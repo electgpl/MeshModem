@@ -1,4 +1,4 @@
-# MeshModemSA — Meshtastic® AT-command modem + LoRa spectrum analyzer
+# MeshModemSA — AT-command modem + LoRa spectrum analyzer
 
 Firmware for the **ESP32 LoRa Zero** (ELECTGPL): a LoRa node compatible with the Meshtastic 2.x network that you drive with AT commands from a serial terminal, from a web browser over WiFi, or from your phone over Bluetooth LE. It also includes an SX1262 **spectrum analyzer** on the same embedded web server, to see how busy the LoRa band is at a given location.
 
