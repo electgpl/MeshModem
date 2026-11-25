@@ -40,7 +40,7 @@ Screenshots taken with simulated data (node names, messages and signals are exam
 
 | File | Description |
 |---|---|
-| `MeshModemSA/MeshModemSA.ino` | Firmware (Arduino IDE). The chat and analyzer web pages are embedded |
+| `MeshModemSA/MeshModemSA.ino` | Firmware (Arduino IDE). The chat and analyzer web pages are embedded. Pin definitions in the `Hardware` block ([wiring](#wiring-sx1262--esp32-s3)) |
 | `mesh_ble.html` | Bluetooth chat page (Web Bluetooth), to be served from GitHub Pages |
 | `docs/` | README screenshots |
 
@@ -57,6 +57,43 @@ The Arduino IDE requires the `.ino` to live in a folder with the same name (`Mes
 | Other | BOOT (GPIO0) and RESET buttons, always-on power LED. Raspberry Pi Zero form factor and 2×20 header |
 
 No battery, fuel gauge or GPIO-driven LEDs. The assembled PCBA uses a TPS2116 instead of the LM66200 and a TG2520SMN TCXO instead of the X1G0054210205 shown in the schematic.
+
+## Wiring: SX1262 ↔ ESP32-S3
+
+The ESP32 LoRa Zero is a custom board that is not sold, so this is the full radio wiring in case you want to build the modem on another board or on a breadboard with an SX1262 module.
+
+| SX1262 signal | SX1262 pin (QFN-24) | ESP32-S3 GPIO | Define in the `.ino` | Notes |
+|---|---|---|---|---|
+| NSS (chip select) | 19 | GPIO8 | `PIN_CS` | 10 kΩ pull-up to 3.3 V on the board |
+| SCK | 18 | GPIO9 | `PIN_SCK` | SPI (FSPI host, routed through the GPIO matrix) |
+| MOSI | 17 | GPIO10 | `PIN_MOSI` | |
+| MISO | 16 | GPIO11 | `PIN_MISO` | |
+| NRESET | 15 | GPIO12 | `PIN_RST` | Also used by RadioLib to reset the chip when leaving the analyzer |
+| BUSY | 14 | GPIO13 | `PIN_BUSY` | Polled before every SPI command |
+| DIO1 | 13 | GPIO14 | `PIN_DIO1` | RX/TX done interrupt, read by polling |
+| DIO2 | 12 | — | `DIO2_RFSW` | Drives the RF switch (TX/RX), not connected to the ESP32 |
+| DIO3 | 6 | — | `TCXO_V` | Powers the 32 MHz TCXO at 1.8 V, not connected to the ESP32 |
+| VDD_IN, VBAT, VBAT_IO | 1, 10, 11 | 3.3 V | — | |
+
+Other pins used by the firmware: **GPIO0** (BOOT button, held 5 s opens the WiFi portal) and the native USB on **GPIO19/20** (serial terminal). No other GPIO is used.
+
+### Using another board
+
+All the hardware definitions are in the `Hardware` block at the top of the `.ino`:
+
+1. **Pins:** set `PIN_CS`, `PIN_SCK`, `PIN_MOSI`, `PIN_MISO`, `PIN_RST`, `PIN_BUSY` and `PIN_DIO1` to your wiring. On the ESP32-S3 any free GPIO works for the SPI bus, but avoid the strapping pins (0, 3, 45, 46), the native USB pins (19, 20), the flash pins (26 to 32) and, on modules with octal PSRAM, 33 to 37.
+2. **Oscillator:** `TCXO_V 1.8f` for modules with a TCXO powered from DIO3 (the usual case for 868/915 MHz modules); `TCXO_V 0` for modules with a plain crystal.
+3. **RF switch:** `DIO2_RFSW true` when DIO2 drives the antenna switch. Modules that need separate RXEN/TXEN GPIOs (for example Ebyte E22 modules, or the Wio-SX1262 with its RXEN line) are not supported as-is: they need `radio.setRfSwitchPins(rxen, txen)` after `radioBegin()` in `setup()` and in `specExit()`, and the RX enable pin driven high during the analyzer sweep.
+4. **Band and node:** `BAND_START` / `BAND_END` for your region, and a unique `NODE_ID`.
+5. **Flash:** choose the partition scheme for your flash size. The message log mounts whichever `spiffs` or `ffat` partition exists, so 4 MB and 8 MB schemes that include one of them also work.
+
+Reference boards (pins taken from the official Meshtastic firmware variants; not tested with this firmware):
+
+| Board | NSS | SCK | MOSI | MISO | RST | BUSY | DIO1 | RF switch | TCXO | Changes needed |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ESP32 LoRa Zero (this project) | 8 | 9 | 10 | 11 | 12 | 13 | 14 | DIO2 | 1.8 V | None |
+| Heltec WiFi LoRa 32 V3 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | DIO2 | 1.8 V | Pins are identical; only the partition scheme for its 8 MB flash |
+| Seeed XIAO ESP32-S3 + Wio-SX1262 | 41 | 7 | 9 | 8 | 42 | 40 | 39 | DIO2 + RXEN on GPIO38 | 1.8 V | Pins, plus RXEN control (see step 3) |
 
 ## Building (Arduino IDE)
 
