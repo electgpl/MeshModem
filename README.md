@@ -219,6 +219,179 @@ The page must be served over `https://`. With GitHub Pages enabled on this repos
 
 ---
 
+## Meshtastic compatibility: what goes over the air
+
+The modem does not use the Meshtastic firmware or its libraries. It builds and parses the same on-air packets from scratch, which is why it talks to regular Meshtastic 2.x nodes on the default primary channel. This section describes each layer and where it lives in the code.
+
+### Frame at a glance
+
+The complete frame, from the radio layer down to the text the user typed:
+
+```
+ LoRa PHY (SX1262)
+ ┌──────────────┬──────────┬─────────────┬───────────────────────────────────────────┬────────┐
+ │ Preamble     │ Sync word│ PHDR        │ PHY payload (16 + N bytes, N ≤ 239)       │ CRC16  │
+ │ 16 symbols   │ 0x2B     │ len,CR,CRC  │                                           │        │
+ └──────────────┴──────────┴─────────────┴───────────────────────────────────────────┴────────┘
+                                          │
+          ┌───────────────────────────────┘
+          ▼
+ Meshtastic packet
+ ┌────────┬────────┬────────┬─────┬─────┬─────┬─────┬──────────────────────────────────────┐
+ │ to     │ from   │ id     │flags│hash │n.hop│relay│ AES-128-CTR ciphertext (N bytes)     │
+ │ 4 B LE │ 4 B LE │ 4 B LE │ 1 B │ 1 B │ 1 B │ 1 B │                                      │
+ └────────┴────────┴────────┴─────┴─────┴─────┴─────┴──────────────────────────────────────┘
+ ◄─────────── 16-byte header, in clear ────────────►│ decrypt with PSK + nonce(id, from)
+                                                    ▼
+ protobuf Data (plaintext)
+ ┌──────┬─────────┬──────┬────────┬───────────────────────────┐
+ │ 0x08 │ portnum │ 0x12 │ length │ payload bytes             │
+ │ tag 1│ varint  │ tag 2│ varint │ UTF-8 text  or  User msg  │
+ └──────┴─────────┴──────┴────────┴───────────────────────────┘
+```
+
+Each layer is described below, followed by a byte-by-byte example of a real packet.
+
+### 1. LoRa physical layer
+
+| Parameter | Value | Code |
+|---|---|---|
+| Modulation | LoRa, explicit header, CRC on | `radioBegin()` |
+| Sync word | `0x2B` (Meshtastic private network) | `radioBegin()` |
+| Preamble | 16 symbols | `radioBegin()` |
+| BW / SF / CR | From the modem preset, same table as the official firmware | `PRESETS[]` |
+
+| Preset | BW [kHz] | SF | CR |
+|---|---|---|---|
+| ShortTurbo | 500 | 7 | 4/5 |
+| ShortFast | 250 | 7 | 4/5 |
+| ShortSlow | 250 | 8 | 4/5 |
+| MediumFast | 250 | 9 | 4/5 |
+| MediumSlow | 250 | 10 | 4/5 |
+| LongTurbo | 500 | 11 | 4/8 |
+| LongFast | 250 | 11 | 4/5 |
+| LongMod | 125 | 11 | 4/8 |
+| LongSlow | 125 | 12 | 4/8 |
+
+### 2. Frequency slot
+
+Like `RadioInterface.cpp` in the official firmware, the frequency is derived from the channel name. For the default primary channel the name is the preset name (`"MediumFast"`, `"LongFast"`...):
+
+```
+num_slots = floor((band_end - band_start) / BW)
+slot      = djb2(channel_name) % num_slots
+freq      = band_start + BW/2 + slot × BW
+```
+
+Example, MediumFast on ANZ (915–928 MHz, BW 250 kHz): 52 slots, `djb2("MediumFast") % 52 = 44`, so the frequency is 915 + 0.125 + 44 × 0.25 = **926.125 MHz**, reported by `ATI` as `SLOT=45/52` (1-based). `AT+FREQ` overrides it. Code: `derive()`.
+
+### 3. Packet header (16 bytes, unencrypted)
+
+```
+ 0        4        8        12  13  14  15  16
+ ├────────┼────────┼────────┼───┼───┼───┼───┼─────────────────────────┐
+ │   to   │  from  │   id   │flg│ch │nh │rly│ encrypted payload ...    │
+ └────────┴────────┴────────┴───┴───┴───┴───┴─────────────────────────┘
+   u32 LE   u32 LE   u32 LE
+```
+
+| Byte | Field | Value sent by this modem |
+|---|---|---|
+| 0–3 | `to` | `0xFFFFFFFF` (broadcast) |
+| 4–7 | `from` | Own NodeNum (`NODE_ID`, `AT+NODE`) |
+| 8–11 | `id` | Random packet ID (`esp_random() \| 1`) |
+| 12 | flags | bits 0–2 `hop_limit`, bit 3 `want_ack` (0), bit 4 `via_mqtt` (0), bits 5–7 `hop_start` (both = `AT+HOP`) |
+| 13 | channel hash | XOR of the channel name bytes XOR the XOR of the key bytes |
+| 14 | `next_hop` | 0 (no preferred next hop) |
+| 15 | `relay_node` | Last byte of the own NodeNum |
+
+`hop_start − hop_limit` gives the number of hops a received packet has travelled (the `hops` field of `+RX`). The channel hash for MediumFast with the default key is `0x1F` (`ATI` shows it as `HASH=1F`). Code: `sendData()`, `receive()`.
+
+### 4. Encryption: AES-128-CTR
+
+- **Key:** the default channel key `AQ==` (one byte, `0x01`) expands to the well-known 16-byte key `d4f1bb3a20290759f0bcffabcf4e6901`.
+- **Counter block (nonce):** `id` as 64-bit little-endian (bytes 0–7, upper half zero), `from` as 32-bit little-endian (bytes 8–11), and a 32-bit block counter (bytes 12–15) incremented as a big-endian 128-bit integer, same as `mbedtls_aes_crypt_ctr`.
+- CTR is symmetric, so the same function encrypts and decrypts. The firmware has its own AES-128 implementation (FIPS-197), with no external crypto library.
+
+Code: `aesKeyExpand()`, `aesBlock()`, `ctr()`.
+
+### 5. Payload: protobuf `Data`
+
+After decryption the payload is a protobuf `Data` message. The firmware encodes and decodes it by hand (varints and length-delimited fields):
+
+| Field | Number | Use |
+|---|---|---|
+| `portnum` | 1 (varint) | `1` = TEXT_MESSAGE_APP, `4` = NODEINFO_APP |
+| `payload` | 2 (bytes) | UTF-8 text, or a protobuf `User` for NodeInfo |
+
+The NodeInfo it sends (at boot, every 3 hours, after `AT+NAME` / `AT+NODE` / `AT+PRESET` / `AT+RELAY`, and with `AT+NI`) is a `User` message:
+
+| `User` field | Number | Value |
+|---|---|---|
+| `id` | 1 | `"!xxxxxxxx"` |
+| `long_name` | 2 | `AT+NAME` long name |
+| `short_name` | 3 | `AT+NAME` short name |
+| `hw_model` | 5 | `PRIVATE_HW` (255) |
+| `role` | 7 | `CLIENT_MUTE` (1), `CLIENT` (0, omitted) or `ROUTER` (2), following `AT+RELAY` |
+| `is_unmessagable` | 9 | `true`: other apps will not offer direct messages to this node |
+
+On reception, packets whose channel hash matches are decrypted; text and NodeInfo are reported (`+RX`, `+NODE`) and other ports are ignored (shown as `+PKT` with `AT+RAW=1`). Code: `pbNext()`, `sendNodeInfo()`.
+
+### Worked example: a text message, byte by byte
+
+The text `Hola mesh` sent by node `!e1ec1001` on MediumFast, default key, `AT+HOP=3`, packet ID `0x1A2B3C4D`. The bytes below were produced with the firmware's own `aesKeyExpand()` / `ctr()` compiled on a PC, and cross-checked with an independent AES-CTR implementation (Python `cryptography`).
+
+**Plaintext `Data` (13 bytes):**
+
+```
+08 01                          field 1 (portnum), varint 1 = TEXT_MESSAGE_APP
+12 09                          field 2 (payload), length 9
+48 6f 6c 61 20 6d 65 73 68     "Hola mesh"
+```
+
+**Counter block (nonce) for AES-128-CTR:**
+
+```
+4d 3c 2b 1a 00 00 00 00 | 01 10 ec e1 | 00 00 00 00
+└── id, 64-bit LE ────┘   └ from LE ─┘   └ counter ┘
+```
+
+**Frame on air (29 bytes = PHY payload):**
+
+| Offset | Bytes | Field | Meaning |
+|---|---|---|---|
+| 0 | `ff ff ff ff` | `to` | Broadcast |
+| 4 | `01 10 ec e1` | `from` | `0xE1EC1001` → `!e1ec1001` |
+| 8 | `4d 3c 2b 1a` | `id` | `0x1A2B3C4D` |
+| 12 | `63` | flags | `0b011_0_0_011`: `hop_start` = 3, `via_mqtt` = 0, `want_ack` = 0, `hop_limit` = 3 |
+| 13 | `1f` | channel hash | xor(`"MediumFast"`) ^ xor(PSK) |
+| 14 | `00` | `next_hop` | None |
+| 15 | `01` | `relay_node` | Last byte of `from` |
+| 16 | `9a 9c 84 de ae d8 cf 9a 52 28 b4 1e 3e` | ciphertext | The 13 plaintext bytes above, encrypted |
+
+After one rebroadcast by a node `!xxxxxx7a`, the same frame comes back with only two bytes changed: byte 12 becomes `62` (`hop_limit` 2, so 1 hop travelled) and byte 15 becomes `7a`. The ciphertext is identical, which is why relays do not need the key and why the sender can recognize its own echo by `from` + `id`.
+
+### 6. Rebroadcast (managed flooding)
+
+Following `NextHopRouter::perhapsRebroadcast()` and `RadioInterface::getTxDelayMsecWeighted()`:
+
+- A received packet is queued for rebroadcast if it is not addressed to this node, `hop_limit > 0`, it was not seen before, and `next_hop` is 0 or this node. It does not need to be decrypted, so packets from other channels and other nodes' DMs are relayed too (like the official `ALL` rebroadcast mode).
+- Before relaying, `hop_limit` is decremented and `relay_node` is set to this node; `hop_start` and the payload are untouched.
+- **Delay:** contention window CW = map(SNR, −20..10 dB → 3..8) and slot time = CAD time + 7.6 ms. Client: `2 × 8 × slot + random(0, 2^CW) × slot`, so nodes with a weaker signal (further away) relay first. Router: `random(0, 2 × CW) × slot`, always ahead of the clients.
+- **Cancellation:** a client drops its pending rebroadcast if it hears another node relay the same packet first (duplicate `from` + `id`). A router never cancels.
+- **Echo detection:** when a neighbor relays one of our own packets, the modem hears it again with the same `from` + `id` and a different `relay_node`. That is reported as `+ECO` ("relayed by N"), an implicit ACK without `want_ack`.
+
+Code: `scheduleRelay()`, `cancelRelay()`, `serviceRelay()`.
+
+### What is not implemented
+
+- Direct messages and PKI encryption (Meshtastic 2.5+ public-key DMs), hence `is_unmessagable`.
+- `want_ack` / routing ACKs, traceroute, position, telemetry and the other port numbers (they are relayed but not decoded).
+- Secondary channels and custom keys: only the default primary channel with the `AQ==` key.
+- The phone app API (`ToRadio` / `FromRadio` over BLE or serial): this modem uses AT commands instead.
+
+---
+
 ## Spectrum analyzer
 
 A tool to see how busy the LoRa band is at a given location. It uses the same radio as the mesh, so it works in **exclusive mode**:
