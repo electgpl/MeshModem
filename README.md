@@ -1,299 +1,317 @@
-# MeshModemSA — modem Meshtastic® por comandos AT + analizador de espectro LoRa
+# MeshModemSA — Meshtastic® AT-command modem + LoRa spectrum analyzer
 
-Firmware para la **ESP32 LoRa Zero** (ELECTGPL): un nodo LoRa compatible con la red Meshtastic 2.x que se maneja con comandos AT desde la terminal serie, desde un navegador (WiFi) o desde el celular por Bluetooth LE. Suma un **analizador de espectro** del SX1262 en la misma web del ESP32, para ver qué tan poblada está la banda LoRa en un lugar.
+Firmware for the **ESP32 LoRa Zero** (ELECTGPL): a LoRa node compatible with the Meshtastic 2.x network that you drive with AT commands from a serial terminal, from a web browser over WiFi, or from your phone over Bluetooth LE. It also includes an SX1262 **spectrum analyzer** on the same embedded web server, to see how busy the LoRa band is at a given location.
+
+<p align="center">
+  <img src="docs/chat.png" alt="Web chat" width="100%">
+</p>
 
 ```
- Terminal serie ── USB ──┐
- Navegador ─────── HTTP ─┼──► intérprete AT único ──► SX1262 ──► malla Meshtastic
- Celular / PC ──── BLE ──┘    (las tres interfaces ven la misma salida)
-                               └─► /spec: analizador de espectro (modo exclusivo)
+ Serial terminal ── USB ──┐
+ Web browser ────── HTTP ─┼──► single AT interpreter ──► SX1262 ──► Meshtastic mesh
+ Phone / PC ─────── BLE ──┘    (all three interfaces see the same output)
+                               └─► /spec: spectrum analyzer (exclusive mode)
 ```
 
-- **Malla:** canal primario por defecto (PSK pública `AQ==`), texto broadcast y NodeInfo, retransmisión con las reglas del firmware oficial (managed flooding), en tres modos: mudo, cliente y router. Detecta los ecos de los mensajes propios como ACK implícito («repetido por N»).
-- **Interfaces:** UART por USB, web por WiFi (red de casa o red propia del modem) y Bluetooth LE (Nordic UART Service). Todas usan el mismo intérprete AT y ven la misma salida.
-- **Historial:** los mensajes quedan guardados en la flash (LittleFS) con fecha y hora, y sobreviven a reinicios.
-- **Analizador de espectro:** barrido del SX1262 en GFSK con el RxBw como RBW. Muestra traza en vivo, máximo, promedio, waterfall, grilla de slots Meshtastic y ocupación por slot. Se ve en el navegador, en `/spec`.
+- **Mesh:** default primary channel (public PSK `AQ==`), text broadcast and NodeInfo, rebroadcasting following the rules of the official firmware (managed flooding) in three modes: mute, client and router. Echoes of your own messages are detected as an implicit ACK ("relayed by N").
+- **Interfaces:** USB serial, web over WiFi (home network or the modem's own network) and Bluetooth LE (Nordic UART Service). All of them share the same AT interpreter and see the same output.
+- **Message log:** messages are stored in flash (LittleFS) with date and time and survive reboots.
+- **Spectrum analyzer:** SX1262 sweep in GFSK mode with the RxBw filter as the RBW. Live trace, max hold, average, waterfall, Meshtastic slot grid and per-slot occupancy, in the browser at `/spec`.
 
-> Meshtastic® es una marca registrada de Meshtastic LLC. Este proyecto es independiente y no está afiliado. No es compatible con la app oficial de Meshtastic: esa app usa su propia API protobuf (`ToRadio`/`FromRadio`), no una serie por BLE.
+> Meshtastic® is a registered trademark of Meshtastic LLC. This is an independent project, not affiliated with Meshtastic. It is not compatible with the official Meshtastic app, which uses its own protobuf API (`ToRadio`/`FromRadio`) rather than a BLE serial port.
 
 ---
 
-## Contenido del repositorio
+## Screenshots
 
-| Archivo | Qué es |
+Screenshots taken with simulated data (node names, messages and signals are examples).
+
+| Spectrum analyzer (`/spec`) |
+|---|
+| ![Spectrum analyzer](docs/spectrum.png) |
+
+| Chat on a phone | Analyzer on a phone | WiFi setup (`/setup`) |
+|---|---|---|
+| ![Phone chat](docs/phone_chat.png) | ![Phone spectrum](docs/phone_spectrum.png) | ![WiFi setup](docs/phone_setup.png) |
+
+---
+
+## Repository contents
+
+| File | Description |
 |---|---|
-| `MeshModemSA/MeshModemSA.ino` | Firmware (Arduino IDE). La web del chat y la del analizador van embebidas |
-| `MeshModemSA/partitions.csv` | Opcional: tabla de particiones «Custom» (ver más abajo) |
-| `mesh_ble.html` | Chat por Bluetooth (Web Bluetooth), para servir desde GitHub Pages |
+| `MeshModemSA/MeshModemSA.ino` | Firmware (Arduino IDE). The chat and analyzer web pages are embedded |
+| `mesh_ble.html` | Bluetooth chat page (Web Bluetooth), to be served from GitHub Pages |
+| `docs/` | README screenshots |
 
-El Arduino IDE exige que el `.ino` esté en una carpeta con su mismo nombre (`MeshModemSA/`).
+The Arduino IDE requires the `.ino` to live in a folder with the same name (`MeshModemSA/`).
 
 ## Hardware: ESP32 LoRa Zero rev 1.0
 
-| Bloque | Detalle |
+| Block | Details |
 |---|---|
-| MCU | ESP32-S3 sin flash interna ni PSRAM, flash externa GD25Q128 de 16 MB, USB nativo en USB-C |
-| Radio | SX1262 con TCXO de 32 MHz alimentado por DIO3 a 1,8 V, regulador DC-DC del SX1262, filtro IPD915, switch BGS12WN6E6327 conmutado por DIO2 y conector U.FL |
-| Pines SX1262 | NSS 8, SCK 9, MOSI 10, MISO 11, RST 12, BUSY 13, DIO1 14 |
-| Alimentación | USB-C o 5 V del conector 2×20 (OR con LM66200), buck-boost TPS631000 a 3,3 V |
-| Otros | Botones BOOT (GPIO0) y RESET, LED de encendido fijo. Formato y conector 2×20 de Raspberry Pi Zero |
+| MCU | ESP32-S3 without internal flash or PSRAM, external GD25Q128 16 MB flash, native USB on USB-C |
+| Radio | SX1262 with a 32 MHz TCXO powered from DIO3 at 1.8 V, SX1262 DC-DC regulator, IPD915 filter, BGS12WN6E6327 RF switch driven by DIO2, U.FL connector |
+| SX1262 pins | NSS 8, SCK 9, MOSI 10, MISO 11, RST 12, BUSY 13, DIO1 14 |
+| Power | USB-C or 5 V from the 2×20 header (ORed by an LM66200), TPS631000 buck-boost to 3.3 V |
+| Other | BOOT (GPIO0) and RESET buttons, always-on power LED. Raspberry Pi Zero form factor and 2×20 header |
 
-No tiene batería, fuel gauge ni LEDs por GPIO. En el PCBA armado van TPS2116 en lugar del LM66200 y TCXO TG2520SMN en lugar del X1G0054210205 del esquemático.
+No battery, fuel gauge or GPIO-driven LEDs. The assembled PCBA uses a TPS2116 instead of the LM66200 and a TG2520SMN TCXO instead of the X1G0054210205 shown in the schematic.
 
-## Compilación (Arduino IDE)
+## Building (Arduino IDE)
 
-**Bibliotecas:** RadioLib 7.x u 8.x (la única externa; probada con 7.8.1 y 8.0.0) y core arduino-esp32 3.x. WiFi, WebServer, DNSServer, ESPmDNS, Preferences, LittleFS y BLE (NimBLE) vienen con el core.
+**Libraries:** RadioLib 7.x or 8.x (the only external one; tested with 7.8.1 and 8.0.0) and the arduino-esp32 3.x core. WiFi, WebServer, DNSServer, ESPmDNS, Preferences, LittleFS and BLE (NimBLE) come with the core.
 
-| Opción | Valor |
+| Option | Value |
 |---|---|
 | Board | ESP32S3 Dev Module |
-| USB CDC On Boot | **Enabled** (terminal por el USB-C) |
+| USB CDC On Boot | **Enabled** (terminal over USB-C) |
 | Flash Size | **16MB (128Mb)** |
 | PSRAM | **Disabled** |
-| Partition Scheme | **16M Flash (3MB APP/9.9MB FATFS)** (recomendado) o **Custom** |
+| Partition Scheme | **16M Flash (3MB APP/9.9MB FATFS)** (recommended) or **Custom** |
 
-Con «USB CDC On Boot: Disabled», la serie sale por U0TXD/U0RXD (GPIO43/44) del conector 2×20.
+With "USB CDC On Boot: Disabled", the serial port is U0TXD/U0RXD (GPIO43/44) on the 2×20 header.
 
-Hay dos esquemas de particiones válidos, y el firmware se adapta solo:
+Two partition schemes work, and the firmware adapts automatically:
 
-- **«16M Flash (3MB APP/9.9MB FATFS)»**, sin `partitions.csv` en la carpeta: dos slots de 3 MB para la aplicación y unos 9,9 MB de historial en la partición `ffat`.
-- **«Custom»** con el `partitions.csv`: dos slots de 4 MB y unos 7,9 MB de historial en la partición `spiffs`.
+- **"16M Flash (3MB APP/9.9MB FATFS)"**, with no `partitions.csv` in the sketch folder: two 3 MB application slots and about 9.9 MB of message log in the `ffat` partition.
+- **"Custom"** with a `partitions.csv`: two 4 MB slots and about 7.9 MB of message log in the `spiffs` partition.
 
-Al arrancar, el firmware busca una partición `spiffs` y, si no la encuentra, usa `ffat`. En ambos casos la formatea como LittleFS la primera vez.
+At boot the firmware looks for a `spiffs` partition and falls back to `ffat`. Either way it is formatted as LittleFS the first time.
 
-**Si se usa el esquema del menú, hay que borrar `partitions.csv` de la carpeta del sketch:** el core lo toma automáticamente si está presente, sin importar lo que se elija en el menú. Al cambiar de tabla de particiones se pierde el historial; la NVS (WiFi y configuración) se conserva. El firmware ocupa alrededor de 1,4 MB.
+**If you use the menu scheme, remove `partitions.csv` from the sketch folder:** the core picks it up automatically if it is present, regardless of the menu selection. Changing the partition table erases the message log; NVS (WiFi and configuration) is preserved. The firmware takes about 1.4 MB.
 
-Antes de compilar conviene revisar el bloque `CONFIG` del `.ino`: `NODE_ID` (único por placa), nombres, preset, banda (ANZ 915–928 MHz por defecto), PIN de BLE y clave de la red propia.
+Before building, review the `CONFIG` block in the `.ino`: `NODE_ID` (unique per board), names, preset, band (ANZ 915–928 MHz by default), BLE PIN and the password of the modem's own network.
 
 ---
 
-## Formas de acceder al dispositivo
+## Ways to access the device
 
-| Método | Necesita | Chat y AT | Analizador | Ideal para |
+| Method | Requires | Chat and AT | Analyzer | Best for |
 |---|---|---|---|---|
-| 1. Terminal serie | Cable USB-C | Sí | Solo comandos | Banco, configuración inicial |
-| 2. Web por la red de casa | WiFi de casa | Sí | Sí (`/spec`) | PC y celular en casa |
-| 3. Web por la red propia | Nada (el modem es el AP) | Sí | Sí (`/spec`) | Calle, desde el celular |
-| 4. BLE con apps de terminal | App BLE | Sí (texto AT) | Solo comandos | Pruebas rápidas sin WiFi |
-| 5. `mesh_ble.html` | Navegador con Web Bluetooth | Sí | No | Chat en la calle sin WiFi |
+| 1. Serial terminal | USB-C cable | Yes | Commands only | Bench, initial setup |
+| 2. Web over the home network | Home WiFi | Yes | Yes (`/spec`) | PC and phone at home |
+| 3. Web over the modem's own network | Nothing (the modem is the AP) | Yes | Yes (`/spec`) | Field use from a phone |
+| 4. BLE with terminal apps | BLE app | Yes (AT text) | Commands only | Quick tests without WiFi |
+| 5. `mesh_ble.html` | Browser with Web Bluetooth | Yes | No | Chat in the field without WiFi |
 
-### 1. Terminal serie (USB)
+### 1. Serial terminal (USB)
 
-Monitor serie del Arduino IDE, PuTTY, Tera Term o Thonny, a 115200 8N1 (con USB CDC la velocidad no importa). Cada comando termina en CR, LF o CR+LF. Para empezar: `ATI` (toda la configuración y el estado) y `AT+HELP`.
+Arduino IDE serial monitor, PuTTY, Tera Term or Thonny, at 115200 8N1 (with USB CDC the baud rate does not matter). Each command ends with CR, LF or CR+LF. To start: `ATI` (full configuration and status) and `AT+HELP`.
 
-Por la terminal se configura todo el nodo (ver [Comandos AT](#comandos-at)) y también se puede usar la malla:
-
-```
-AT+SEND=hola desde la terminal      envía un mensaje al canal
-+TX:1a2b3c4d                        transmitido
-+ECO:1a2b3c4d,relay=5C,ABCD,-92,6.5,2   otro nodo lo repitió
-+RX:!a1b2c3d4,!ffffffff,-101,-3.2,1,hola   mensaje recibido
-AT+NODES                            nodos escuchados
-AT+LOG=20                           últimos 20 mensajes del historial
-```
-
-Todo lo que pasa en la web y por BLE se refleja en la terminal: los comandos recibidos por esas vías aparecen como `[web] comando` y `[ble] comando`.
-
-### 2. Web por la red de casa (modo STA)
+The whole node is configured from the terminal (see [AT commands](#at-commands)), and you can also use the mesh:
 
 ```
-AT+WIFI=MiRed,MiClave
+AT+SEND=hello from the terminal        sends a message to the channel
++TX:1a2b3c4d                           transmitted
++ECO:1a2b3c4d,relay=5C,ABCD,-92,6.5,2  another node relayed it
++RX:!a1b2c3d4,!ffffffff,-101,-3.2,1,hi a message was received
+AT+NODES                               heard nodes
+AT+LOG=20                              last 20 log entries
 ```
 
-Las credenciales se guardan y el modem se conecta. `ATI` y `AT+WIFI?` informan la IP:
+Everything that happens on the web and over BLE is mirrored on the terminal: commands received through those interfaces appear as `[web] command` and `[ble] command`.
 
-- **Chat:** `http://meshmodem.local/` o `http://<ip>/`
-- **Analizador:** `http://meshmodem.local/spec`
-- **Historial completo:** `http://meshmodem.local/log.jsonl`
+### 2. Web over the home network (STA mode)
 
-La PC y el celular siguen con internet porque están en la misma red que el modem. Si el nombre `.local` no resuelve (pasa en algunos Android), hay que usar la IP. También se puede cargar la red sin terminal: sin credenciales guardadas, o manteniendo BOOT 5 s, el modem levanta un portal cautivo abierto `MeshModem-XXXX` con la página de configuración en `http://192.168.4.1`.
+```
+AT+WIFI=MyNetwork,MyPassword
+```
 
-### 3. Web por la red propia del modem (modo AP, para la calle)
+The credentials are stored and the modem connects. `ATI` and `AT+WIFI?` report the IP:
 
-Sin la red de casa, el modem levanta **su propia red WiFi** con la web completa. No necesita internet.
+- **Chat:** `http://meshmodem.local/` or `http://<ip>/`
+- **Analyzer:** `http://meshmodem.local/spec`
+- **Full message log:** `http://meshmodem.local/log.jsonl`
 
-| `AT+WIFIMODE` | Comportamiento |
+PC and phone keep their internet access because they are on the same network as the modem. If the `.local` name does not resolve (some Android devices), use the IP. You can also enter the network without a terminal: with no saved credentials, or holding BOOT for 5 s, the modem brings up an open captive portal `MeshModem-XXXX` with the setup page at `http://192.168.4.1`.
+
+### 3. Web over the modem's own network (AP mode, for the field)
+
+Without the home network, the modem brings up **its own WiFi network** with the full web interface. No internet needed.
+
+| `AT+WIFIMODE` | Behavior |
 |---|---|
-| `AUTO` (de fábrica) | Intenta la red de casa. Si en 20 s no conecta, levanta la red propia hasta el próximo reinicio. Sin credenciales, va directo a la red propia |
-| `STA` | Solo la red de casa. Sin credenciales, abre el portal de configuración |
-| `AP` | Siempre la red propia |
+| `AUTO` (default) | Tries the home network. If it does not connect within 20 s, it brings up its own network until the next reboot. With no credentials it goes straight to its own network |
+| `STA` | Home network only. With no credentials, it opens the configuration portal |
+| `AP` | Always its own network |
 
-- **Red:** `MeshModem-XXXX`, WPA2 con clave `meshmodem` (`AP_PASS`). Se cambia con `AT+APPASS=nueva_clave` (8 a 63 caracteres); `AT+APPASS=` sin valor la deja abierta.
-- **Chat:** `http://192.168.4.1/` · **Analizador:** `http://192.168.4.1/spec` · **Red de casa:** `http://192.168.4.1/setup`.
-- **iPhone:** Ajustes → Wi-Fi → `MeshModem-XXXX` → clave. iOS avisa «Sin conexión a internet», pero se queda conectado y usa los datos móviles para el resto. Con *Compartir → Agregar a inicio*, el chat queda como una app.
-- **PC:** también puede conectarse a esta red, pero mientras tanto su placa WiFi no tiene internet (salvo que use cable de red). Para la PC conviene el método 2.
-- **Hora:** sin NTP, el modem toma la hora del navegador al abrir la página (`AT+TIME=`), así el historial queda con hora real.
+- **Network:** `MeshModem-XXXX`, WPA2 with password `meshmodem` (`AP_PASS`). Change it with `AT+APPASS=new_password` (8 to 63 characters); `AT+APPASS=` with no value leaves it open.
+- **Chat:** `http://192.168.4.1/` · **Analyzer:** `http://192.168.4.1/spec` · **Home network:** `http://192.168.4.1/setup`.
+- **iPhone:** Settings → Wi-Fi → `MeshModem-XXXX` → password. iOS warns "No Internet Connection" but stays connected and uses mobile data for everything else. With *Share → Add to Home Screen*, the chat behaves like an app.
+- **PC:** it can join this network too, but meanwhile its WiFi adapter has no internet (unless it also has a wired connection). Method 2 is more convenient for a PC.
+- **Time:** without NTP, the modem takes the time from the browser when the page opens (`AT+TIME=`), so the message log gets real timestamps.
 
-`AT+WIFI?` responde `+WIFI:AP,MeshModem-XXXX,192.168.4.1,CLIENTES=1,MODO=AUTO`.
+`AT+WIFI?` replies `+WIFI:AP,MeshModem-XXXX,192.168.4.1,CLIENTS=1,MODE=AUTO`.
 
-### 4. Bluetooth LE con apps de terminal
+### 4. Bluetooth LE with terminal apps
 
-Usa el **Nordic UART Service (NUS)**, el estándar de hecho para una serie por BLE:
+It uses the **Nordic UART Service (NUS)**, the de facto standard for a serial port over BLE:
 
 | | UUID |
 |---|---|
-| Servicio | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` |
-| RX (escribe el celular) | `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` |
-| TX (notifica el modem) | `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` |
+| Service | `6E400001-B5A3-F393-E0A9-E50E24DCCA9E` |
+| RX (written by the phone) | `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` |
+| TX (notified by the modem) | `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` |
 
-- **Nombre:** `MeshModem-XXXX`. Funciona sin WiFi.
-- **Emparejamiento:** escribir exige emparejar con PIN (passkey fijo, MITM, Secure Connections y bonding). El PIN de fábrica es `123456` (`BLE_PIN`) y se cambia con `AT+BLEPIN=nnnnnn`, que se aplica al reiniciar. Con `AT+BLEPIN=0` queda abierto: cualquiera cercano podría mandar comandos.
-- **Comandos:** cada uno termina en CR o LF. Si la app no agrega terminador, se ejecuta igual tras 300 ms de silencio.
-- **Respuestas:** notificaciones de hasta MTU−3 bytes (se pide MTU 247).
+- **Name:** `MeshModem-XXXX`. Works without WiFi.
+- **Pairing:** writing requires pairing with a PIN (fixed passkey, MITM, Secure Connections and bonding). The default PIN is `123456` (`BLE_PIN`); change it with `AT+BLEPIN=nnnnnn`, applied on reboot. With `AT+BLEPIN=0` it is open: anyone nearby could send commands.
+- **Commands:** each one ends with CR or LF. If the app adds no terminator, the command runs after 300 ms of silence.
+- **Responses:** notifications of up to MTU−3 bytes (MTU 247 is requested).
 
-Apps probadas:
+Tested apps:
 
-- **Android:** *Serial Bluetooth Terminal* (Kai Morich). Devices → Bluetooth LE → `MeshModem-XXXX`, y escribir `ATI`.
-- **Android / iOS:** *nRF Connect*. Conectar, abrir el servicio Nordic UART, activar las notificaciones en TX y escribir texto UTF-8 en RX.
-- **Bluefruit Connect:** modo UART.
+- **Android:** *Serial Bluetooth Terminal* (Kai Morich). Devices → Bluetooth LE → `MeshModem-XXXX`, then type `ATI`.
+- **Android / iOS:** *nRF Connect*. Connect, open the Nordic UART service, enable notifications on TX and write UTF-8 text to RX.
+- **Bluefruit Connect:** UART mode.
 
-### 5. Chat por Bluetooth: `mesh_ble.html`
+### 5. Bluetooth chat: `mesh_ble.html`
 
-Página Web Bluetooth con el mismo chat que la web del modem, conectada por BLE, sin WiFi:
+A Web Bluetooth page with the same chat as the modem's web page, connected over BLE, without WiFi:
 
-- **Pestañas:** *Chat* (mensajes, NodeInfo, «✓ repetido por N» / «✗ sin eco»), *Nodos* y *Terminal* (líneas crudas del modem y una línea para escribir comandos AT).
-- **Al conectar** pide `ATI`, `AT+NODES` y `AT+LOG=30`, toma la hora del teléfono y sigue en vivo. En el chat, una línea que empieza con `/` se manda como comando AT.
+- **Tabs:** *Chat* (messages, NodeInfo, "✓ relayed by N" / "✗ no echo"), *Nodes* and *Terminal* (raw modem lines and an input line for AT commands).
+- **On connection** it requests `ATI`, `AT+NODES` and `AT+LOG=30`, sets the phone time and keeps updating live. In the chat, a line starting with `/` is sent as an AT command.
 
-La página tiene que servirse por `https://`. Con GitHub Pages queda en `https://<usuario>.github.io/<repo>/mesh_ble.html`. No depende del modem, así que se puede guardar en la pantalla de inicio.
+The page must be served over `https://`. With GitHub Pages enabled on this repository it is available at `https://<user>.github.io/<repo>/mesh_ble.html`. It does not depend on the modem, so it can be saved to the home screen.
 
-| Plataforma | Navegador |
+| Platform | Browser |
 |---|---|
-| iPhone / iPad | **Bluefy** (gratis). Safari y Chrome de iOS no implementan Web Bluetooth |
+| iPhone / iPad | **Bluefy** (free). Safari and Chrome on iOS do not implement Web Bluetooth |
 | Android | Chrome |
-| Windows / Mac / Linux | Chrome o Edge |
+| Windows / Mac / Linux | Chrome or Edge |
 
 ---
 
-## Analizador de espectro
+## Spectrum analyzer
 
-Herramienta para ver qué tan poblada está la banda LoRa en un lugar. Usa la misma radio que la malla, así que funciona en **modo exclusivo**:
+A tool to see how busy the LoRa band is at a given location. It uses the same radio as the mesh, so it works in **exclusive mode**:
 
-- **Mientras está activo, el nodo no recibe, no envía y no repite paquetes.** Al entrar se descartan las retransmisiones pendientes. Los NodeInfo pedidos en ese tiempo (periódico, `AT+NAME`, `AT+PRESET`...) quedan pendientes y se envían al volver. `AT+SEND` y `AT+NI` responden `ERROR` con `+SPEC:ACTIVO`.
-- **Los cambios de radio** (`AT+PRESET`, `AT+FREQ`, `AT+PWR`...) se aceptan y se aplican al volver a la malla.
-- **Vuelve solo a la malla:** con «Detener», con `AT+SPEC=0`, al cerrar la página, a los **20 s sin pedidos** de `/api/spec` (`SA_LEASE_MS`) o a los **30 min** (`SA_MAX_MS`). Al volver, la radio se reinicializa con la misma secuencia de `setup()`: reset por RST y `begin()`.
-- **Medición** (la del LoRaSA): modem en GFSK con el RxBw como RBW (4,8 a 467 kHz). Por punto: `SetRfFrequency` → `SetRx` continuo → espera → N × `GetRssiInst`, con detector de pico y promedio en potencia lineal. Va por SPI directo, sin depender de la versión de RadioLib. Se conservan el TCXO por DIO3 y el switch por DIO2.
-- **El barrido se hace por tramos** de 8 ms por vuelta del `loop()`: la web, el BLE y la UART siguen respondiendo.
-- **Por defecto barre la banda del nodo** (`AT+BAND`) con paso de 50 kHz, RBW de 117,3 kHz y N = 4. En ANZ son 261 puntos y unos 80 ms de medición.
-- **Ocupación:** fracción de barridos en que el pico supera el piso (mediana del promedio) más un umbral ajustable (10 dB por defecto), en toda la banda y por slot Meshtastic. Depende del RBW y del umbral.
+- **While it is active, the node does not receive, send or relay packets.** On entry, pending rebroadcasts are dropped. NodeInfo requested meanwhile (periodic, `AT+NAME`, `AT+PRESET`...) stays pending and is sent on return. `AT+SEND` and `AT+NI` reply `ERROR` with `+SPEC:ACTIVE`.
+- **Radio changes** (`AT+PRESET`, `AT+FREQ`, `AT+PWR`...) are accepted and applied when returning to the mesh.
+- **It returns to the mesh by itself:** with "Stop", with `AT+SPEC=0`, when the page is closed, after **20 s without** `/api/spec` requests (`SA_LEASE_MS`) or after **30 min** (`SA_MAX_MS`). On return, the radio is re-initialized with the same sequence as `setup()`: reset through RST and `begin()`.
+- **Measurement:** modem in GFSK with the RxBw filter as the RBW (4.8 to 467 kHz). Per point: `SetRfFrequency` → continuous `SetRx` → settling → N × `GetRssiInst`, with a peak detector and an average in linear power. Direct SPI access, independent of the RadioLib version. The TCXO on DIO3 and the RF switch on DIO2 are preserved.
+- **The sweep runs in slices** of 8 ms per `loop()` pass: web, BLE and UART keep responding.
+- **By default it sweeps the node's band** (`AT+BAND`) with a 50 kHz step, 117.3 kHz RBW and N = 4. For ANZ that is 261 points and about 80 ms of measurement.
+- **Occupancy:** fraction of sweeps in which the peak exceeds the noise floor (median of the average) plus an adjustable threshold (10 dB by default), over the whole band and per Meshtastic slot. It depends on the RBW and the threshold.
 
-| Comando | Función |
+| Command | Function |
 |---|---|
-| `AT+SPEC=1` / `AT+SPEC=0` | Entra al analizador (suspende la malla) / vuelve a la malla |
-| `AT+SPEC?` | `+SPEC:ON,915.000,928.000,50.0,117.3,4,261,SETTLE=218us,BARRIDOS=n,QUEDAN=s` |
-| `AT+SPECCFG=f0,f1,paso,rbw,n` | MHz, MHz, kHz, kHz (al RBW válido más cercano), muestras por punto 1..64; hasta 2048 puntos |
+| `AT+SPEC=1` / `AT+SPEC=0` | Enters the analyzer (suspends the mesh) / returns to the mesh |
+| `AT+SPEC?` | `+SPEC:ON,915.000,928.000,50.0,117.3,4,261,SETTLE=218us,SWEEPS=n,LEFT=s` |
+| `AT+SPECCFG=f0,f1,step,rbw,n` | MHz, MHz, kHz, kHz (snapped to the nearest valid RBW), samples per point 1..64; up to 2048 points |
 
-Si se entra con `AT+SPEC=1` desde la UART o BLE y nadie abre `/spec`, el modem vuelve a la malla a los 20 s. Repetir `AT+SPEC=1` renueva el plazo.
+If you enter with `AT+SPEC=1` from the UART or BLE and nobody opens `/spec`, the modem returns to the mesh after 20 s. Repeating `AT+SPEC=1` renews the lease.
 
-**Un solo cliente del analizador a la vez.** Cada lectura de `/api/spec` entrega el máximo acumulado desde la lectura anterior y lo reinicia: con dos navegadores abiertos en `/spec`, cada uno vería solo parte de los picos.
+**One analyzer client at a time.** Each `/api/spec` read returns the maximum accumulated since the previous read and resets it: with two browsers open on `/spec`, each one would see only part of the peaks.
 
-### Qué se puede ver y qué no
+### What it can and cannot show
 
-- **Piso de ruido** ≈ −174 + 10·log(RBW) + NF: con 117 kHz, unos −117 dBm. La malla decodifica hasta unos −127 dBm (SF9 / BW 250 kHz), así que los nodos con SNR negativa no aparecen en el espectro. Se ven la interferencia, la ocupación de la banda, las ráfagas fuertes y LoRaWAN.
-- **Espurias propias a verificar** con carga de 50 Ω en el U.FL: 904, 912, 920 y 928 MHz (armónicas del SPI a 8 MHz), 920 MHz (XTAL de 40 MHz × 23), 928 MHz (TCXO de 32 MHz × 29). Una espuria fija aparece como un slot ocupado al 100 %. Las ráfagas de TX de WiFi y BLE pueden levantar el piso de forma momentánea.
-- **Fuera de 902–928 MHz** el filtro IPD915 y la red de adaptación atenúan: las lecturas allí son solo relativas.
+- **Noise floor** ≈ −174 + 10·log(RBW) + NF: about −117 dBm at 117 kHz. The mesh decodes down to about −127 dBm (SF9 / BW 250 kHz), so nodes received with negative SNR do not show up in the spectrum. It shows interference, band occupancy, strong bursts and LoRaWAN traffic.
+- **Self-generated spurs to check** with a 50 Ω load on the U.FL: 904, 912, 920 and 928 MHz (8 MHz SPI clock harmonics), 920 MHz (40 MHz crystal × 23), 928 MHz (32 MHz TCXO × 29). A fixed spur shows up as a slot at 100 % occupancy. WiFi and BLE TX bursts can briefly raise the floor.
+- **Outside 902–928 MHz** the IPD915 filter and the matching network attenuate the signal: readings there are only relative.
 
 ---
 
-## Comandos AT
+## AT commands
 
-Los cambios se aplican en el momento. `AT+SAVE` guarda la configuración de radio en la flash (NVS); sin `AT+SAVE` se pierde al reiniciar. `AT&F` vuelve a los valores del bloque `CONFIG`.
+Changes take effect immediately. `AT+SAVE` stores the radio configuration in flash (NVS); without `AT+SAVE` it is lost on reboot. `AT&F` restores the values of the `CONFIG` block.
 
-| Comando | Función |
+| Command | Function |
 |---|---|
-| `AT`, `AT+HELP`, `ATI` / `AT+INFO?` | Prueba, ayuda, configuración y estado completos |
-| `AT+NODE=!aabbccdd` | NodeNum de 32 bit en hex (8 dígitos) |
-| `AT+NAME=largo[,corto]` | Nombre largo (≤ 39) y corto (≤ 4) |
-| `AT+PRESET=?` / `AT+PRESET=MediumFast` | Lista de presets / preset por nombre o número (0..8) |
-| `AT+BAND=915,928` | Banda en MHz (ANZ 915,928 · US 902,928 · EU_868 869.4,869.65 · BR_902 902,907.5) |
-| `AT+FREQ=926.125` / `AT+FREQ=0` | Frecuencia manual / slot automático |
-| `AT+HOP=3` | Saltos máximos de lo que origina el nodo (0..7) |
-| `AT+RELAY=0\|1\|2` | Retransmisión: mudo / cliente (por defecto) / router |
-| `AT+PWR=20` | Potencia de TX en dBm (−9..22) |
-| `AT+SEND=texto` | Texto broadcast al canal primario (≤ 232 bytes) |
-| `AT+NI`, `AT+NODES` | Envía NodeInfo / lista de nodos escuchados |
-| `AT+SAVE`, `AT&F`, `AT+RST` | Guardar en flash / valores de fábrica / reinicio |
-| `AT+WIFI=ssid,clave`, `AT+WIFI?` | Credenciales de la red de casa / estado de WiFi |
-| `AT+WIFIMODE=AUTO\|STA\|AP` | Modo WiFi (se guarda) |
-| `AT+APPASS=clave` | Clave de la red propia (vacía = abierta) |
-| `AT+PORTAL` | Portal de configuración WiFi (o BOOT 5 s) |
-| `AT+TIME=epoch` | Hora en segundos UTC, si no hay NTP |
-| `AT+BLE=0\|1`, `AT+BLE?`, `AT+BLEPIN=nnnnnn` | Bluetooth apagado / encendido, estado, PIN (0 = sin PIN) |
-| `AT+SPEC=1\|0`, `AT+SPEC?`, `AT+SPECCFG=...` | Analizador de espectro (ver arriba) |
-| `AT+LOG=20`, `AT+LOGCLR` | Últimas N entradas del historial / borrar historial |
-| `AT+RAW=0\|1` | Traza de todo lo recibido |
+| `AT`, `AT+HELP`, `ATI` / `AT+INFO?` | Test, help, full configuration and status |
+| `AT+NODE=!aabbccdd` | 32-bit NodeNum in hex (8 digits) |
+| `AT+NAME=long[,short]` | Long name (≤ 39) and short name (≤ 4) |
+| `AT+PRESET=?` / `AT+PRESET=MediumFast` | List of presets / preset by name or number (0..8) |
+| `AT+BAND=915,928` | Band in MHz (ANZ 915,928 · US 902,928 · EU_868 869.4,869.65 · BR_902 902,907.5) |
+| `AT+FREQ=926.125` / `AT+FREQ=0` | Manual frequency / automatic slot |
+| `AT+HOP=3` | Max hops for packets originated by the node (0..7) |
+| `AT+RELAY=0\|1\|2` | Rebroadcast: mute / client (default) / router |
+| `AT+PWR=20` | TX power in dBm (−9..22) |
+| `AT+SEND=text` | Text broadcast on the primary channel (≤ 232 bytes) |
+| `AT+NI`, `AT+NODES` | Sends NodeInfo / list of heard nodes |
+| `AT+SAVE`, `AT&F`, `AT+RST` | Save to flash / factory defaults / reboot |
+| `AT+WIFI=ssid,password`, `AT+WIFI?` | Home network credentials / WiFi status |
+| `AT+WIFIMODE=AUTO\|STA\|AP` | WiFi mode (stored) |
+| `AT+APPASS=password` | Own network password (empty = open) |
+| `AT+PORTAL` | WiFi configuration portal (or BOOT for 5 s) |
+| `AT+TIME=epoch` | Time in UTC seconds, when there is no NTP |
+| `AT+BLE=0\|1`, `AT+BLE?`, `AT+BLEPIN=nnnnnn` | Bluetooth off / on, status, PIN (0 = no PIN) |
+| `AT+SPEC=1\|0`, `AT+SPEC?`, `AT+SPECCFG=...` | Spectrum analyzer (see above) |
+| `AT+LOG=20`, `AT+LOGCLR` | Last N log entries / erase the log |
+| `AT+RAW=0\|1` | Trace of everything received |
 
-**Respuestas no solicitadas:**
+**Unsolicited responses:**
 
-| Línea | Significado |
+| Line | Meaning |
 |---|---|
-| `+RX:!from,!to,rssi,snr,saltos,texto` | Mensaje de texto recibido |
-| `+NODE:!from,rssi,snr,corto,largo` | NodeInfo recibido |
-| `+TX:id` | Mensaje propio transmitido |
-| `+ECO:id,relay=XX,nombre,rssi,snr,hop_limit` | Otro nodo repitió un mensaje propio (`hop_limit` = HOP−1: vecino directo; menor: más lejos) |
-| `+ECO:id,0` | Nadie lo repitió en 15 s |
-| `+RELAY:!from,id,hop_limit` | Paquete retransmitido (con `AT+RAW=1`) |
-| `+WIFI:UP,...`, `+WIFI:DOWN`, `+WIFI:AP,...`, `+WIFI:PORTAL,...` | Cambios de WiFi |
-| `+BLE:CONECTADO`, `+BLE:DESCONECTADO` | Cambios de conexión Bluetooth |
-| `+SPEC:ON,...`, `+SPEC:OFF,motivo,RADIO=e` | Entrada y salida del analizador |
-| `[web] comando`, `[ble] comando` | Comando recibido por la web o por BLE |
+| `+RX:!from,!to,rssi,snr,hops,text` | Text message received |
+| `+NODE:!from,rssi,snr,short,long` | NodeInfo received |
+| `+TX:id` | Own message transmitted |
+| `+ECO:id,relay=XX,name,rssi,snr,hop_limit` | Another node relayed one of your messages (`hop_limit` = HOP−1: direct neighbor; lower: further away) |
+| `+ECO:id,0` | Nobody relayed it within 15 s |
+| `+RELAY:!from,id,hop_limit` | Packet rebroadcast (with `AT+RAW=1`) |
+| `+WIFI:UP,...`, `+WIFI:DOWN`, `+WIFI:AP,...`, `+WIFI:PORTAL,...`, `+WIFI:NOT_FOUND,...` | WiFi changes |
+| `+BLE:CONNECTED`, `+BLE:DISCONNECTED` | Bluetooth connection changes |
+| `+SPEC:ON,...`, `+SPEC:OFF,reason,RADIO=e` | Analyzer entry and exit |
+| `[web] command`, `[ble] command` | Command received from the web or over BLE |
 
 ---
 
-## API HTTP
+## HTTP API
 
-Es la que usa la web embebida, y sirve para integrar el modem en scripts propios.
+Used by the embedded web pages; also handy to integrate the modem into your own scripts.
 
-| Ruta | Método | Respuesta |
+| Route | Method | Response |
 |---|---|---|
-| `/` | GET | Chat web (o el portal, si está activo) |
-| `/spec` | GET | Página del analizador de espectro |
-| `/setup` | GET | Configuración de la red de casa |
-| `/api/at` | POST `cmd=<comando>` | Salida del comando AT en texto, terminada en `OK` o `ERROR` |
-| `/api/info` | GET | JSON con la configuración y el estado: nodo, nombres, preset, banda, frecuencia, slot, `nch`, `bw`, potencia, retransmisión, WiFi, BLE, `spec`, nodos escuchados |
-| `/api/ev?since=N&seen=0\|1` | GET | Eventos nuevos desde la secuencia N: `{"next":N,"ev":[...]}`. `seen=1` marca los mensajes como leídos |
-| `/api/log?n=N` | GET | Últimas N entradas del historial (1..500): `{"next":N,"log":[...]}` |
-| `/log.jsonl` | GET | Historial completo, una línea JSON por evento |
-| `/api/spec` | GET | Último barrido en binario (ver abajo). Renueva el plazo del analizador. `409 OFF` si el analizador no está activo |
-| `/scan`, `/wifi` | GET / POST | Escaneo de redes y alta de credenciales (portal) |
+| `/` | GET | Web chat (or the portal, when active) |
+| `/spec` | GET | Spectrum analyzer page |
+| `/setup` | GET | Home network setup |
+| `/api/at` | POST `cmd=<command>` | AT command output as text, ending in `OK` or `ERROR` |
+| `/api/info` | GET | JSON with configuration and status: node, names, preset, band, frequency, slot, `nch`, `bw`, power, rebroadcast, WiFi, BLE, `spec`, heard nodes |
+| `/api/ev?since=N&seen=0\|1` | GET | New events since sequence N: `{"next":N,"ev":[...]}`. `seen=1` marks messages as read |
+| `/api/log?n=N` | GET | Last N log entries (1..500): `{"next":N,"log":[...]}` |
+| `/log.jsonl` | GET | Full message log, one JSON line per event |
+| `/api/spec` | GET | Last sweep in binary (see below). Renews the analyzer lease. `409 OFF` if the analyzer is not active |
+| `/scan`, `/wifi` | GET / POST | Network scan and credential entry (portal) |
 
-Ejemplo con curl:
+Example with curl:
 
 ```
 curl -d "cmd=ATI" http://meshmodem.local/api/at
-curl -d "cmd=AT+SEND=hola desde la PC" http://meshmodem.local/api/at
+curl -d "cmd=AT+SEND=hello from the PC" http://meshmodem.local/api/at
 ```
 
-**Formato de `/api/spec`** (little-endian, cabecera de 32 B):
+**`/api/spec` format** (little-endian, 32-byte header):
 
-| Offset | Tipo | Campo |
+| Offset | Type | Field |
 |---|---|---|
 | 0 | 2 × char | `'S' 'A'` |
-| 2 | u8 | versión (1) |
-| 3 | u8 | muestras por punto |
-| 4 | u32 | número de barrido |
-| 8 | u32 | duración del último barrido [µs] |
-| 12 | f32 | frecuencia inicial [MHz] |
-| 16 | f32 | paso [kHz] |
+| 2 | u8 | version (1) |
+| 3 | u8 | samples per point |
+| 4 | u32 | sweep number |
+| 8 | u32 | duration of the last sweep [µs] |
+| 12 | f32 | start frequency [MHz] |
+| 16 | f32 | step [kHz] |
 | 20 | f32 | RBW [kHz] |
-| 24 | u16 | n, número de puntos |
-| 26 | u16 | barridos acumulados desde la lectura anterior (0 = sin datos nuevos) |
-| 28 | u16 | segundos que quedan de la sesión |
-| 30 | u16 | espera tras `SetRx` [µs] |
-| 32 | n × u8 | pico: máximo desde la lectura anterior |
-| 32 + n | n × u8 | promedio del último barrido |
+| 24 | u16 | n, number of points |
+| 26 | u16 | sweeps accumulated since the previous read (0 = no new data) |
+| 28 | u16 | seconds left in the session |
+| 30 | u16 | settling time after `SetRx` [µs] |
+| 32 | n × u8 | peak: maximum since the previous read |
+| 32 + n | n × u8 | average of the last sweep |
 
-Cada byte vale −2·P [dBm], el formato nativo de `GetRssiInst`: P = −byte / 2. En Python: `struct.unpack_from("<2sBBIIfffHHHH", body)`.
+Each byte is −2·P [dBm], the native `GetRssiInst` format: P = −byte / 2. In Python: `struct.unpack_from("<2sBBIIfffHHHH", body)`.
 
 ---
 
-## Notas técnicas
+## Technical notes
 
-- **Pila BLE:** NimBLE, la que trae arduino-esp32 3.x para el S3. En el core 3.3.0 el Security Manager se configura directo en `ble_hs_cfg`, porque `BLESecurity::setStaticPIN()` no enlaza (la biblioteca declara miembros estáticos que nunca define). Desde 3.3.1 se usa `BLESecurity::setPassKey()`.
-- **Concurrencia:** la tarea de NimBLE solo escribe en un anillo de 512 bytes protegido con spinlock. Todos los comandos (UART, web y BLE) se ejecutan en el `loop()`, así que no hay acceso concurrente a la radio. El analizador también corre en el `loop()`.
-- **Coexistencia:** WiFi y BLE comparten la radio de 2,4 GHz del S3 por time-slicing. Para chat y comandos no se nota.
-- **RadioLib:** compila con 7.8.1 y con 8.0.0. Una capa de compatibilidad aísla el cambio de API de la versión 8 (`ConfigLoRa_t`, frecuencias en Hz).
-- **AES-128 propio** en modo CTR, compatible con el cifrado del firmware oficial (contador = id | from).
+- **BLE stack:** NimBLE, the one arduino-esp32 3.x ships for the S3. On core 3.3.0 the Security Manager is configured directly in `ble_hs_cfg`, because `BLESecurity::setStaticPIN()` does not link (the library declares static members it never defines). From 3.3.1 on, `BLESecurity::setPassKey()` is used.
+- **Concurrency:** the NimBLE task only writes into a 512-byte ring buffer protected by a spinlock. All commands (UART, web and BLE) run in `loop()`, so the radio is never accessed concurrently. The analyzer also runs in `loop()`.
+- **Coexistence:** WiFi and BLE share the S3's 2.4 GHz radio by time slicing. It is not noticeable for chat and commands.
+- **RadioLib:** builds with 7.8.1 and 8.0.0. A compatibility layer isolates the API change of version 8 (`ConfigLoRa_t`, frequencies in Hz).
+- **Own AES-128** in CTR mode, compatible with the official firmware's encryption (counter = id | from).
 
-## Licencia
+## License
 
-MIT. Autor: Electgpl.
+MIT — see [LICENSE](LICENSE). Author: Electgpl.
