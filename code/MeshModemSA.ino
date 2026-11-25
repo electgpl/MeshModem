@@ -1,5 +1,5 @@
 /* ============================================================================
-   ELECTGPL — MeshModemSA v3.8  (Mesh_Modem_Web_v3_TCXO_BLE v3.7 + spectrum analyzer)
+   ELECTGPL — MeshModemSA v3.9  (Mesh_Modem_Web_v3_TCXO_BLE v3.7 + spectrum analyzer + diagnostics)
    LoRa node compatible with the Meshtastic® network, with rebroadcasting (hops),
    web chat, AT commands and a LoRa spectrum analyzer on the same web server
    ----------------------------------------------------------------------------
@@ -76,8 +76,30 @@
      When another node rebroadcasts one of our messages, the modem hears the echo
      (same from and id, with the relay_node of the repeater). It is reported as
      +ECO:id,relay=XX,name,rssi,snr,hop_limit and on the web next to the message:
-     "relayed by N". If nobody relayed it within 15 s: +ECO:id,0 ("no echo").
-     hop_limit = HOP-1 means a direct neighbor; lower means one hop further.
+     "relayed by N". hop_limit = HOP-1 means a direct neighbor; lower means one hop further.
+     RETRIES (AT+RETRY, default 2): like ReliableRouter in the official firmware (3 attempts
+     for a broadcast), an own text that gets no echo is sent again: the SAME frame, same id,
+     after the getRetransmissionMsec() time (2 x airtime + contention + 4.5 s, ~5 s on
+     MediumFast). Nodes that already have it drop it as a duplicate, so nobody sees it twice.
+     The first echo cancels the remaining attempts. Texts go out with want_ack = 1, as the
+     official app sends them (a broadcast with want_ack is never ACKed: the echo is the ACK).
+     Each retry: +RETX:id,k/N. Without echoes after the last attempt: +ECO:id,0 ("no relay heard").
+
+   DIAGNOSTICS (AT+DIAG)
+     Counters since boot or since AT+DIAG=0, without leaving the mesh:
+     - Noise floor: GetRssiInst sampled every 50 ms while in RX, P10 and P50 of the
+       histogram (P10 ~ floor without traffic). Use it to compare conditions (PC USB vs
+       power bank, antenna, place); the absolute value carries the SX1262 RSSI tolerance.
+     - CHUTIL: % of the last minute with the channel busy (RX frames + own TX), TXUTIL: %
+       of the last hour transmitting. Same definitions as AirTime in the official firmware.
+     - RX: frames OK, CRC errors, damaged headers (many = demodulating at the limit),
+       frames of other channels, duplicates.
+     - SNR of valid frames (min/avg/max) and MARGIN = average SNR - SF limit (-2.5 x (SF - 4)).
+     - TX: own packets, retries, how many got an echo, rebroadcasts.
+     AT+NI=1 sends NodeInfo with want_response: nodes that hear it answer with their own
+     NodeInfo addressed to this node (+HEARDBY). The official firmware throttles those
+     replies (one per requester every 12 h, and not if it sent its own NodeInfo recently),
+     so silence does not prove that nobody hears you.
 
    REBROADCAST (AT+RELAY)
      0 = mute (CLIENT_MUTE): does not rebroadcast.
@@ -113,6 +135,10 @@
      AT+PWR=20               TX power in dBm (-9..22)
      AT+SEND=text            Text broadcast on the primary channel (<=232 bytes)
      AT+NI                   Sends NodeInfo
+     AT+NI=1                 NodeInfo asking for replies: who hears this node (+HEARDBY)
+     AT+RETRY=0..3           Retransmissions of own texts without echo (stored; 0 = off)
+     AT+RETRY?               Current value
+     AT+DIAG / AT+DIAG=0     Link diagnostics / reset its counters
      AT+NODES                Heard nodes
      AT+SAVE                 Stores the radio configuration in flash
      AT+WIFI=ssid,password   Stores WiFi credentials and connects
@@ -133,7 +159,9 @@
 
    UNSOLICITED RESPONSES
      +RX:!from,!to,rssi,snr,hops,text         +NODE:!from,rssi,snr,short,long
-     +TX:id     +ECO:id,relay=XX,name,rssi,snr,hop_limit     +ECO:id,0 (no echo within 15 s)
+     +TX:id     +ECO:id,relay=XX,name,rssi,snr,hop_limit     +ECO:id,0 (no relay heard)
+     +RETX:id,k/N  retry k of N     +HEARDBY:!from,rssi,snr,short  NodeInfo addressed to this node
+     +RAW:len,status,rssi,snr,hash[,!from,id,hop_limit/hop_start,next_hop,relay] (with AT+RAW=1)
      +RELAY:!from,id,hop_limit (with AT+RAW=1)     +WIFI:UP,ssid,url     +WIFI:DOWN     +WIFI:PORTAL,net,ip
      [web] command  /  [ble] command           command received from the web or over BLE
      +BLE:CONNECTED / +BLE:DISCONNECTED        Bluetooth connection changes
@@ -169,7 +197,8 @@
 #define BAND_END    928.0f
 #define FREQ_MAN    0.0f               // 0 = automatic slot
 #define HOP_LIMIT   3
-#define TX_DBM      20
+#define TX_DBM      22                 // SX1262 maximum, as a typical Meshtastic node
+#define RETRY_DEF   2                  // retries of own texts without echo (official: 3 attempts)
 #define RELAY_MODE  1                  // 0 mute, 1 client, 2 router
 #define HOSTNAME    "meshmodem"        // http://meshmodem.local
 #define TZ_STR      "<-03>3"           // Argentina, UTC-3 without daylight saving time
@@ -237,6 +266,9 @@ const char HELP[] =
   "AT+PWR=-9..22         TX power in dBm\r\n"
   "AT+SEND=text          text broadcast\r\n"
   "AT+NI  AT+NODES       send NodeInfo / heard nodes\r\n"
+  "AT+NI=1               NodeInfo asking for replies (who hears me)\r\n"
+  "AT+RETRY=0..3  AT+RETRY?  retries of own texts without echo\r\n"
+  "AT+DIAG  AT+DIAG=0    link diagnostics / reset counters\r\n"
   "AT+SAVE               store radio configuration in flash\r\n"
   "AT+WIFI=ssid,password WiFi credentials   AT+WIFI?  status\r\n"
   "AT+WIFIMODE=AUTO|STA|AP  home with fallback / home only / own network\r\n"
@@ -267,6 +299,16 @@ float slotMs;                                                        // contenti
 struct Pend { bool used; uint32_t from, id, due; uint8_t len, buf[255]; };
 Pend pend[6];
 uint32_t stRelayed, stCanceled, stDropped;                           // rebroadcast statistics
+uint8_t retryMax = RETRY_DEF;                                        // AT+RETRY (NVS "retry")
+
+// Diagnostics (AT+DIAG): counters since boot or since AT+DIAG=0
+struct Diag {
+  uint32_t t0, rxOk, rxCrc, rxHdr, rxErr, rxForeign, rxDup;          // received frames
+  uint32_t txOwn, txRetx, ownEcho, ownNoEcho, relay0;                // own transmissions
+  uint32_t snrN; float snrMin, snrMax, snrSum;                       // SNR of valid frames
+  uint32_t nfN, nf[256];                                             // GetRssiInst histogram, index = -2*dBm
+} dg;
+uint32_t cuBin[6], cuLast, txBin[60], txLast;                        // airtime: 6 x 10 s, 60 x 60 s
 const char* RELAY_NAME[] = {"MUTE", "CLIENT", "ROUTER"};
 
 // Spectrum analyzer: while specOn is set, the radio does not belong to the mesh
@@ -601,7 +643,10 @@ bool ledsOn = true;
 uint16_t unread = 0;                                                 // unread text messages
 
 // ======================= Echoes of own messages (implicit ACK) ==============
-struct OwnTx { uint32_t id, t; uint8_t n, rb[8]; bool done; };       // distinct relays that rebroadcast it
+struct OwnTx {                                                       // own packet: echoes and retries
+  uint32_t id, t, wait; uint8_t n, rb[8]; bool done;                 // rb = distinct relays that rebroadcast it
+  uint8_t left, tries, len, frm[255];                                // retries left, attempts, frame as sent
+};
 OwnTx own[8]; uint8_t ownIdx; uint32_t lastTxId;
 uint32_t tMsgLed = 0;                                                // arrival of the last message
 
@@ -617,6 +662,32 @@ void ledsLoop() {
   digitalWrite(PIN_LED_GREEN, green ? HIGH : LOW);
 }
 
+// ======================= Airtime (AirTime.cpp in the official firmware) =====
+uint32_t toaMs(size_t n) { return (uint32_t)((radio.getTimeOnAir(n) + 500) / 1000); }
+
+void airRoll() {                                                     // clears the bins that expired
+  uint32_t c = millis() / 10000, h = millis() / 60000;
+  if (c - cuLast >= 6) memset(cuBin, 0, sizeof(cuBin)); else while (cuLast != c) cuBin[++cuLast % 6] = 0;
+  if (h - txLast >= 60) memset(txBin, 0, sizeof(txBin)); else while (txLast != h) txBin[++txLast % 60] = 0;
+  cuLast = c; txLast = h;
+}
+
+void airLog(uint32_t ms, bool tx) {                                  // every frame heard or sent counts as busy
+  airRoll();
+  cuBin[cuLast % 6] += ms;
+  if (tx) txBin[txLast % 60] += ms;
+}
+
+float chUtil() { airRoll(); uint32_t s = 0; for (uint32_t v : cuBin) s += v; return s / 600.0f; }    // % of 60 s
+float txUtil() { airRoll(); uint32_t s = 0; for (uint32_t v : txBin) s += v; return s / 36000.0f; }  // % of 1 h
+
+// Wait for an echo before retrying: RadioInterface::getRetransmissionMsec()
+//   2 x airtime + (2^CW + 2 x CWmax + 2^((CWmin + CWmax) / 2)) x slot + 4500 ms, CW from the channel use
+uint32_t retxMs(size_t n) {
+  long cw = constrain(map((long)chUtil(), 0, 100, 3, 8), 3, 8);
+  return 2 * toaMs(n) + (uint32_t)(((1UL << cw) + 2 * 8 + (1UL << 5)) * slotMs) + 4500;
+}
+
 // ======================= TX =================================================
 bool txRaw(uint8_t* pkt, size_t n) {                                 // CAD + transmission of a ready frame
   if (specOn) return false;                                          // analyzer active: no transmission
@@ -624,18 +695,21 @@ bool txRaw(uint8_t* pkt, size_t n) {                                 // CAD + tr
     delay(100 + esp_random() % 400);
   int e = radio.transmit(pkt, n);
   radio.startReceive();
+  if (e == RADIOLIB_ERR_NONE) airLog(toaMs(n), true);
   return e == RADIOLIB_ERR_NONE;
 }
 
-bool sendData(uint8_t port, const uint8_t* pl, size_t len) {
+bool sendData(uint8_t port, const uint8_t* pl, size_t len, bool wantResp) {
   uint8_t pkt[256]; uint32_t to = 0xFFFFFFFF, id = esp_random() | 1;
   uint8_t* d = pkt + 16; size_t k = 0;
   d[k++] = 0x08; d[k++] = port;                                     // Data.portnum (field 1, varint)
   d[k++] = 0x12; k += pbVarint(d + k, len);                         // Data.payload (field 2, bytes)
-  if (16 + k + len > 255) return false;
+  if (16 + k + len + (wantResp ? 2 : 0) > 255) return false;
   memcpy(d + k, pl, len); k += len;
+  if (wantResp) { d[k++] = 0x18; d[k++] = 0x01; }                   // Data.want_response (field 3, varint)
+  bool retry = port == PORT_TEXT && retryMax > 0;                    // only texts are retried, as in the app
   memcpy(pkt, &to, 4); memcpy(pkt + 4, &cfg.node, 4); memcpy(pkt + 8, &id, 4);
-  pkt[12] = (cfg.hop << 5) | cfg.hop;                               // hop_start | hop_limit, want_ack = 0
+  pkt[12] = (cfg.hop << 5) | (retry ? 0x08 : 0) | cfg.hop;          // hop_start | want_ack | hop_limit
   pkt[13] = chHash; pkt[14] = 0; pkt[15] = cfg.node & 0xFF;         // channel hash, next_hop, relay_node
   ctr(d, k, id, cfg.node);
   seen[seenIdx++ & 31] = ((uint64_t)cfg.node << 32) | id;           // ignore the repeaters' echoes
@@ -644,11 +718,39 @@ bool sendData(uint8_t port, const uint8_t* pl, size_t len) {
     io.printf("+TX:%08x\r\n", (unsigned)id);
     lastTxId = id;
     OwnTx& o = own[ownIdx++ & 7]; o.id = id; o.t = millis(); o.n = 0; o.done = false;   // to recognize its echoes
+    o.left = retry ? retryMax : 0; o.tries = 1; o.len = 16 + k; memcpy(o.frm, pkt, o.len);
+    o.wait = retxMs(o.len);
+    dg.txOwn++;
   }
   return ok;
 }
 
-bool sendNodeInfo() {                                               // protobuf User
+// Own packets: retry while there is no echo, then report the result (once per packet)
+void ownLoop() {
+  for (auto& o : own) {
+    if (!o.id || o.done) continue;
+    uint32_t el = millis() - o.t, win = o.wait > 15000 ? o.wait : 15000;
+    if (!o.n && o.left && el >= o.wait) {                            // no echo yet: same frame, same id
+      o.left--; o.tries++; o.t = millis();
+      if (txRaw(o.frm, o.len)) {
+        dg.txRetx++;
+        io.printf("+RETX:%08x,%u/%u\r\n", (unsigned)o.id, o.tries, o.tries + o.left);
+        pushEv("\"t\":\"retx\",\"id\":\"" + String(o.id, HEX) + "\",\"k\":" + String(o.tries) +
+               ",\"of\":" + String(o.tries + o.left));
+      }
+    } else if (el > win && (o.n || !o.left)) {
+      o.done = true;
+      if (o.n) dg.ownEcho++;
+      else {
+        dg.ownNoEcho++;
+        io.printf("+ECO:%08x,0\r\n", (unsigned)o.id);
+        pushEv("\"t\":\"noeco\",\"id\":\"" + String(o.id, HEX) + "\",\"k\":" + String(o.tries));
+      }
+    }
+  }
+}
+
+bool sendNodeInfoReq(bool want) {                                   // protobuf User; want = want_response
   if (specOn) { niPending = true; return false; }                    // sent when returning to the mesh
   String id = hexId(cfg.node);
   uint8_t u[64]; size_t n = 0;
@@ -658,8 +760,10 @@ bool sendNodeInfo() {                                               // protobuf 
   const uint8_t ROLE[] = {1, 0, 2};                                  // CLIENT_MUTE, CLIENT, ROUTER
   if (ROLE[cfg.relay]) { u[n++] = 0x38; u[n++] = ROLE[cfg.relay]; }  // role (field 7; CLIENT = 0 is omitted)
   u[n++] = 0x48; u[n++] = 0x01;                                      // is_unmessagable = true: no DMs
-  return sendData(PORT_NODEINFO, u, n);
+  return sendData(PORT_NODEINFO, u, n, want);
 }
+
+bool sendNodeInfo() { return sendNodeInfoReq(false); }
 
 // ======================= Rebroadcast (managed flooding) =====================
 // Same contention window as RadioInterface::getTxDelayMsecWeighted():
@@ -705,8 +809,25 @@ void receive() {
   uint8_t p[256]; size_t n = radio.getPacketLength(); if (n > 255) n = 255;
   int st = radio.readData(p, n); float rssi = radio.getRSSI(), snr = radio.getSNR();
   radio.startReceive();
-  if (rawMode) io.printf("+RAW:%u,%d,%.0f,%.1f,%02X\r\n", (unsigned)n, st, rssi, snr, n > 13 ? p[13] : 0);
-  if (st != RADIOLIB_ERR_NONE || n < 16) return;
+  airLog(toaMs(n), false);
+  bool good = st == RADIOLIB_ERR_NONE && n >= 16;
+  if (rawMode) {
+    io.printf("+RAW:%u,%d,%.0f,%.1f,%02X", (unsigned)n, st, rssi, snr, n > 13 ? p[13] : 0);
+    if (good) {                                                      // clear header: who, hops, relay
+      uint32_t f, i; memcpy(&f, p + 4, 4); memcpy(&i, p + 8, 4);
+      io.printf(",!%08x,%08x,%u/%u,%02X,%02X", (unsigned)f, (unsigned)i, p[12] & 7, p[12] >> 5, p[14], p[15]);
+    }
+    io.print("\r\n");
+  }
+  if (!good) {
+    if (st == RADIOLIB_ERR_CRC_MISMATCH) dg.rxCrc++;
+    else if (st == RADIOLIB_ERR_LORA_HEADER_DAMAGED) dg.rxHdr++;
+    else dg.rxErr++;
+    return;
+  }
+  dg.rxOk++; dg.snrN++; dg.snrSum += snr;
+  if (dg.snrN == 1 || snr < dg.snrMin) dg.snrMin = snr;
+  if (dg.snrN == 1 || snr > dg.snrMax) dg.snrMax = snr;
   uint32_t to, from, id; memcpy(&to, p, 4); memcpy(&from, p + 4, 4); memcpy(&id, p + 8, 4);
   if (from == cfg.node) {                                            // echo: another node rebroadcast one of ours
     uint8_t rb = p[15], hlE = p[12] & 7;
@@ -723,13 +844,14 @@ void receive() {
     return;
   }
   uint64_t key = ((uint64_t)from << 32) | id;
-  for (uint64_t s : seen) if (s == key) { cancelRelay(from, id); return; }   // duplicate: someone already rebroadcast it
+  for (uint64_t s : seen) if (s == key) { dg.rxDup++; cancelRelay(from, id); return; }   // duplicate: already rebroadcast
   seen[seenIdx++ & 31] = key;
   int hl = p[12] & 7, hs = p[12] >> 5, hops = hs ? hs - hl : -1;
   // Rebroadcast: like NextHopRouter::perhapsRebroadcast(). Applies to any channel (no decryption needed)
   if (cfg.relay && to != cfg.node && hl > 0 && id && (p[14] == 0 || p[14] == (cfg.node & 0xFF)))
     scheduleRelay(p, n, snr, from, id);
-  if (n < 20 || p[13] != chHash) return;                             // other channel: only rebroadcast
+  if (p[13] != chHash) { dg.rxForeign++; return; }                   // other channel: only rebroadcast
+  if (n < 20) return;
   uint8_t* d = p + 16; size_t L = n - 16; ctr(d, L, id, from);
   uint32_t port = 0, f, v; const uint8_t *s, *pl = nullptr; size_t pn = 0, i = 0;
   while (i < L) {
@@ -743,7 +865,8 @@ void receive() {
     unread++; tMsgLed = millis() | 1;                                // green LED
     io.printf("+RX:!%08x,!%08x,%.0f,%.1f,%d,", (unsigned)from, (unsigned)to, rssi, snr, hops);
     io.write(pl, pn); io.print("\r\n");
-    logEv("\"t\":\"rx\"," + meta + ",\"to\":\"" + hexId(to) + "\",\"hops\":" + String(hops) +
+    char rb[3]; snprintf(rb, sizeof(rb), "%02X", p[15]);             // relay_node: last byte of who delivered it
+    logEv("\"t\":\"rx\"," + meta + ",\"to\":\"" + hexId(to) + "\",\"hops\":" + String(hops) + ",\"rb\":\"" + rb + "\"" +
            ",\"sn\":" + jStr(ne->sn) + ",\"txt\":" + jStr((const char*)pl, pn));
   } else if (port == PORT_NODEINFO) {
     size_t j = 0;
@@ -753,6 +876,11 @@ void receive() {
     }
     io.printf("+NODE:!%08x,%.0f,%.1f,%s,%s\r\n", (unsigned)from, rssi, snr, ne->sn, ne->ln);
     pushEv("\"t\":\"node\"," + meta + ",\"sn\":" + jStr(ne->sn) + ",\"ln\":" + jStr(ne->ln));
+    if (to == cfg.node) {                                            // addressed to us: that node hears us
+      io.printf("+HEARDBY:!%08x,%.0f,%.1f,%s\r\n", (unsigned)from, rssi, snr, ne->sn);
+      sysEv(String(ne->sn[0] ? ne->sn : hexId(from).c_str()) + " (" + hexId(from) + ") hears this node: NodeInfo reply, SNR " +
+            String(snr, 1) + " dB");
+    }
   } else if (rawMode) io.printf("+PKT:!%08x,%u,%u\r\n", (unsigned)from, (unsigned)port, (unsigned)pn);
 }
 
@@ -1183,7 +1311,7 @@ void info() {
   io.printf("+PRESET:%s,BW=%.1f,SF=%u,CR=4/%u,HASH=%02X\r\n", p.name, p.bw, p.sf, p.cr, chHash);
   io.printf("+BAND:%.3f,%.3f\r\n+FREQ:%.4f,%s,SLOT=%u/%u\r\n", cfg.f0, cfg.f1, freq,
             cfg.fov > 0 ? "MANUAL" : "AUTO", (unsigned)slot + 1, (unsigned)nCh);
-  io.printf("+HOP:%u\r\n+PWR:%d\r\n+RAW:%d\r\n", cfg.hop, cfg.pwr, rawMode);
+  io.printf("+HOP:%u\r\n+PWR:%d\r\n+RETRY:%u\r\n+RAW:%d\r\n", cfg.hop, cfg.pwr, retryMax, rawMode);
   battStatus();
   io.printf("+RELAY:%s,RELAYED=%lu,CANCELED=%lu,DROPPED=%lu,SLOT=%.1fms\r\n", RELAY_NAME[cfg.relay],
             (unsigned long)stRelayed, (unsigned long)stCanceled, (unsigned long)stDropped, slotMs);
@@ -1193,6 +1321,45 @@ void info() {
   bleStatus();
   wifiStatus();
   specStatus();
+}
+
+void diagReset() { memset(&dg, 0, sizeof(dg)); dg.t0 = millis(); dg.relay0 = stRelayed; }
+
+// Noise floor: GetRssiInst every 50 ms while in RX (frames in flight barely move the P10)
+void nfSample() {
+  static uint32_t t;
+  if (specOn || radioErr || millis() - t < 50) return;
+  t = millis();
+  if (digitalRead(PIN_DIO1) == HIGH) return;                         // a frame is waiting in the FIFO
+  int r = (int)(-2.0f * radio.getRSSI(false) + 0.5f);
+  if (r < 0 || r > 255) return;
+  dg.nf[r]++; dg.nfN++;
+}
+
+float nfPct(float q) {                                               // q-quantile of the histogram [dBm]
+  uint32_t target = (uint32_t)(dg.nfN * q), acc = 0;
+  for (int r = 255; r >= 0; r--) { acc += dg.nf[r]; if (acc > target) return -0.5f * r; }
+  return 0;
+}
+
+void diag() {
+  const Preset& p = PRESETS[cfg.preset];
+  float lim = -2.5f * (p.sf - 4);                                    // LoRa demodulation limit: SF7 -7.5 ... SF12 -20 dB
+  io.printf("+DIAG:TIME=%lus,%s,%.4fMHz,PWR=%d,RETRY=%u\r\n", (unsigned long)((millis() - dg.t0) / 1000), p.name, freq,
+            cfg.pwr, retryMax);
+  if (dg.nfN) io.printf("+DIAG:NOISE,P10=%.1fdBm,P50=%.1fdBm,N=%lu\r\n", nfPct(0.1f), nfPct(0.5f), (unsigned long)dg.nfN);
+  else io.print("+DIAG:NOISE,NO_DATA\r\n");
+  io.printf("+DIAG:AIRTIME,CHUTIL=%.1f%%,TXUTIL=%.2f%%\r\n", chUtil(), txUtil());
+  io.printf("+DIAG:RX,OK=%lu,CRC=%lu,HEADER=%lu,ERR=%lu,OTHER_CH=%lu,DUP=%lu\r\n", (unsigned long)dg.rxOk,
+            (unsigned long)dg.rxCrc, (unsigned long)dg.rxHdr, (unsigned long)dg.rxErr, (unsigned long)dg.rxForeign,
+            (unsigned long)dg.rxDup);
+  if (dg.snrN) {
+    float avg = dg.snrSum / dg.snrN;
+    io.printf("+DIAG:SNR,MIN=%.1f,AVG=%.1f,MAX=%.1f,LIMIT=%.1f,MARGIN=%.1fdB\r\n", dg.snrMin, avg, dg.snrMax, lim, avg - lim);
+  } else io.print("+DIAG:SNR,NO_DATA\r\n");
+  io.printf("+DIAG:TX,OWN=%lu,RETX=%lu,ECHOED=%lu,NO_ECHO=%lu,RELAYED=%lu\r\n", (unsigned long)dg.txOwn,
+            (unsigned long)dg.txRetx, (unsigned long)dg.ownEcho, (unsigned long)dg.ownNoEcho,
+            (unsigned long)(stRelayed - dg.relay0));
 }
 
 void listNodes() {
@@ -1207,7 +1374,7 @@ void at(String s) {
   int eq = s.indexOf('='); String a = eq >= 0 ? s.substring(eq + 1) : ""; a.trim();
   bool ok = true;
 
-  if (specOn && (u.startsWith("AT+SEND=") || u == "AT+NI")) {      // analyzer active: no transmission
+  if (specOn && (u.startsWith("AT+SEND=") || u.startsWith("AT+NI"))) {   // analyzer active: no transmission
     io.print("+SPEC:ACTIVE,mesh suspended (AT+SPEC=0 to return)\r\nERROR\r\n");
     return;
   }
@@ -1216,10 +1383,18 @@ void at(String s) {
   else if (u == "AT+HELP" || u == "AT+HELP?") io.print(HELP);
   else if (u == "ATI" || u == "AT+INFO?") info();
   else if (u.startsWith("AT+SEND=")) {
-    ok = a.length() > 0 && sendData(PORT_TEXT, (const uint8_t*)a.c_str(), a.length());
+    ok = a.length() > 0 && sendData(PORT_TEXT, (const uint8_t*)a.c_str(), a.length(), false);
     if (ok) logEv("\"t\":\"tx\",\"id\":\"" + String(lastTxId, HEX) + "\",\"sn\":" + jStr(cfg.sn) + ",\"txt\":" + jStr(a.c_str()));
   }
-  else if (u == "AT+NI") ok = sendNodeInfo();
+  else if (u == "AT+NI" || u == "AT+NI=0") ok = sendNodeInfo();
+  else if (u == "AT+NI=1") ok = sendNodeInfoReq(true);
+  else if (u == "AT+RETRY?") io.printf("+RETRY:%u\r\n", retryMax);
+  else if (u.startsWith("AT+RETRY=")) {
+    ok = a.length() == 1 && a[0] >= '0' && a[0] <= '3';
+    if (ok) { retryMax = a[0] - '0'; nvs.putUChar("retry", retryMax); }
+  }
+  else if (u == "AT+DIAG" || u == "AT+DIAG?") diag();
+  else if (u == "AT+DIAG=0") diagReset();
   else if (u == "AT+NODES") listNodes();
   else if (u.startsWith("AT+NODE=")) {
     if (a[0] == '!') a.remove(0, 1);
@@ -1316,7 +1491,7 @@ void at(String s) {
     ok = fsOk;
     if (ok) { LittleFS.remove(LOG_FILE); LittleFS.remove(LOG_OLD); sysEv("Message log erased"); }
   }
-  else if (u == "AT&F") { cfg = DEF; nvs.remove("cfg"); applyRadio(); sendNodeInfo(); }
+  else if (u == "AT&F") { cfg = DEF; nvs.remove("cfg"); retryMax = RETRY_DEF; nvs.remove("retry"); applyRadio(); sendNodeInfo(); }
   else if (u == "AT+RST") { io.print("OK\r\n"); Serial.flush(); delay(100); ESP.restart(); }
   else ok = false;
 
@@ -1451,14 +1626,17 @@ const div=document.createElement('div');div.className='l';
 for(const [txt,cls,style] of parts){const sp=document.createElement('span');sp.textContent=txt;if(cls)sp.className=cls;if(style)sp.style.cssText=style;div.appendChild(sp)}
 log.appendChild(div);while(log.children.length>500)log.removeChild(log.firstChild);if(stick)log.scrollTop=log.scrollHeight;return div}
 const txEl={};
+function rbName(rb){rb=rb.toLowerCase();for(const k in names)if(k.endsWith(rb))return names[k];return rb}
 function nick(id,sn){const n=sn||names[id]||id;return['<'+n+'>','n','color:hsl('+hue(id)+' 60% 50%)']}
 function addEv(e,hist){const t=['['+hhmm(e.ts,e.up)+'] ','t'];
 if(e.t==='rx'){if(e.sn)names[e.from]=e.sn;
-const meta=e.rssi+' dBm, '+e.snr+' dB'+(e.hops>=0?', '+e.hops+(e.hops===1?' hop':' hops'):'')+(e.to!=='!ffffffff'?', to '+e.to:'');
+const via=e.hops===0?', direct':(e.rb&&e.rb!=='00'?', via '+rbName(e.rb):'');
+const meta=e.rssi+' dBm, '+e.snr+' dB'+(e.hops>=0?', '+e.hops+(e.hops===1?' hop':' hops'):'')+via+(e.to!=='!ffffffff'?', to '+e.to:'');
 line([t,nick(e.from,e.sn),[' '+e.txt],[meta,'m']])}
 else if(e.t==='tx'){const d=line([t,['<'+e.sn+'>','n me'],[' '+e.txt],[hist?'':'waiting for echo…','m eco']]);
-if(e.id&&!hist){const x=txEl[e.id]={sp:d.lastChild,who:[]};
-setTimeout(()=>{if(!x.who.length){x.sp.textContent='✗ no echo: nobody in range relayed it';x.sp.style.color='var(--warn)'}},15000)}}
+if(e.id&&!hist)txEl[e.id]={sp:d.lastChild,who:[]}}
+else if(e.t==='retx'){const x=txEl[e.id];if(x&&!x.who.length)x.sp.textContent='no echo yet, retry '+e.k+'/'+e.of+'…'}
+else if(e.t==='noeco'){const x=txEl[e.id];if(x&&!x.who.length){x.sp.textContent='✗ no relay heard'+(e.k>1?' after '+e.k+' attempts':'');x.sp.style.color='var(--warn)'}}
 else if(e.t==='eco'){const x=txEl[e.id];const w=(e.rb==='00'?'a node with firmware older than 2.6':(e.sn||e.rb))+(info&&e.hl<info.hop-1?' (2nd hop)':'');
 if(x){if(x.who.includes(w))return;x.who.push(w);x.sp.textContent='✓ relayed by '+x.who.length+': '+x.who.join(', ');x.sp.style.color='var(--acc)'}
 else line([t,['-- echo of your message '+e.id+' relayed by '+w,'s']])}
@@ -1910,6 +2088,8 @@ void setup() {
   if (nvs.getBytes("cfg", &c, sizeof(c)) == sizeof(c) && c.magic == DEF.magic) cfg = c;
   wSsid = nvs.getString("ssid", ""); wPass = nvs.getString("pass", "");
   wifiMode = nvs.getUChar("wmode", 0); if (wifiMode > 2) wifiMode = 0;
+  retryMax = nvs.getUChar("retry", RETRY_DEF); if (retryMax > 3) retryMax = RETRY_DEF;
+  diagReset();
   apPass = nvs.getString("appass", AP_PASS);
   setenv("TZ", TZ_STR, 1); tzset();                                  // local time even without NTP
   // Message log: uses the "spiffs" partition (partitions.csv or 4 MB schemes) or, if it does not
@@ -1946,7 +2126,7 @@ void setup() {
   server.on("/setup", HTTP_GET, hSetup);
   server.onNotFound(hNotFound);
 
-  io.printf("\r\n+READY:MeshModemSA v3.8 (Mesh_Modem_Web_v3_TCXO_BLE v3.7 + SA),RADIO=%d,BOOT=%s  (AT+HELP = commands)\r\n", e, resetReason());
+  io.printf("\r\n+READY:MeshModemSA v3.9 (Mesh_Modem_Web_v3_TCXO_BLE v3.7 + SA + diagnostics),RADIO=%d,BOOT=%s  (AT+HELP = commands)\r\n", e, resetReason());
   bleOn = nvs.getUChar("ble", BLE_ENABLE); blePin = nvs.getULong("blepin", BLE_PIN);
   if (bleOn) bleInit();
   wifiStart();
@@ -1968,8 +2148,8 @@ void loop() {
   bootButton();
   if (bleSrv) bleLoop();
   if (HAS_LEDS) ledsLoop();
-  for (auto& o : own)                                                // 15 s without echoes: reported on the 3 interfaces
-    if (o.id && !o.done && millis() - o.t > 15000) { o.done = true; if (!o.n) io.printf("+ECO:%08x,0\r\n", (unsigned)o.id); }
+  ownLoop();                                                          // retries and "no relay heard" (3 interfaces)
+  nfSample();                                                         // noise floor for AT+DIAG
   static uint32_t tBatt = millis();
   if (millis() - tBatt >= BATT_PERIOD_MS) { tBatt = millis(); battRead(); }
   serviceRelay();
