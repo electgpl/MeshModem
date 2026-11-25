@@ -1,4 +1,4 @@
-# MeshModemSA — AT-command modem + LoRa spectrum analyzer
+# MeshModemSA — Meshtastic® AT-command modem + LoRa spectrum analyzer
 
 Firmware for the **ESP32 LoRa Zero** (ELECTGPL): a LoRa node compatible with the Meshtastic 2.x network that you drive with AT commands from a serial terminal, from a web browser over WiFi, or from your phone over Bluetooth LE. It also includes an SX1262 **spectrum analyzer** on the same embedded web server, to see how busy the LoRa band is at a given location.
 
@@ -13,7 +13,8 @@ Firmware for the **ESP32 LoRa Zero** (ELECTGPL): a LoRa node compatible with the
                                └─► /spec: spectrum analyzer (exclusive mode)
 ```
 
-- **Mesh:** default primary channel (public PSK `AQ==`), text broadcast and NodeInfo, rebroadcasting following the rules of the official firmware (managed flooding) in three modes: mute, client and router. Echoes of your own messages are detected as an implicit ACK ("relayed by N").
+- **Mesh:** default primary channel (public PSK `AQ==`), text broadcast and NodeInfo, rebroadcasting following the rules of the official firmware (managed flooding) in three modes: mute, client and router. Echoes of your own messages are detected as an implicit ACK ("relayed by N"), and texts without an echo are retried with the same packet ID, like the official firmware.
+- **Link diagnostics:** `AT+DIAG` reports noise floor, channel utilization, CRC errors, SNR margin and echo rate without leaving the mesh; `AT+NI=1` asks nearby nodes to answer, to see who hears you.
 - **Interfaces:** USB serial, web over WiFi (home network or the modem's own network) and Bluetooth LE (Nordic UART Service). All of them share the same AT interpreter and see the same output.
 - **Message log:** messages are stored in flash (LittleFS) with date and time and survive reboots.
 - **Spectrum analyzer:** SX1262 sweep in GFSK mode with the RxBw filter as the RBW. Live trace, max hold, average, waterfall, Meshtastic slot grid and per-slot occupancy, in the browser at `/spec`.
@@ -206,7 +207,7 @@ Tested apps:
 
 A Web Bluetooth page with the same chat as the modem's web page, connected over BLE, without WiFi:
 
-- **Tabs:** *Chat* (messages, NodeInfo, "✓ relayed by N" / "✗ no echo"), *Nodes* and *Terminal* (raw modem lines and an input line for AT commands).
+- **Tabs:** *Chat* (messages, NodeInfo, "✓ relayed by N" / "✗ no relay heard"), *Nodes* and *Terminal* (raw modem lines and an input line for AT commands).
 - **On connection** it requests `ATI`, `AT+NODES` and `AT+LOG=30`, sets the phone time and keeps updating live. In the chat, a line starting with `/` is sent as an AT command.
 
 The page must be served over `https://`. With GitHub Pages enabled on this repository it is available at `https://<user>.github.io/<repo>/mesh_ble.html`. It does not depend on the modem, so it can be saved to the home screen.
@@ -300,7 +301,7 @@ Example, MediumFast on ANZ (915–928 MHz, BW 250 kHz): 52 slots, `djb2("MediumF
 | 0–3 | `to` | `0xFFFFFFFF` (broadcast) |
 | 4–7 | `from` | Own NodeNum (`NODE_ID`, `AT+NODE`) |
 | 8–11 | `id` | Random packet ID (`esp_random() \| 1`) |
-| 12 | flags | bits 0–2 `hop_limit`, bit 3 `want_ack` (0), bit 4 `via_mqtt` (0), bits 5–7 `hop_start` (both = `AT+HOP`) |
+| 12 | flags | bits 0–2 `hop_limit`, bit 3 `want_ack` (1 for texts while `AT+RETRY` > 0, as the official app sends them; 0 for NodeInfo), bit 4 `via_mqtt` (0), bits 5–7 `hop_start` (both = `AT+HOP`) |
 | 13 | channel hash | XOR of the channel name bytes XOR the XOR of the key bytes |
 | 14 | `next_hop` | 0 (no preferred next hop) |
 | 15 | `relay_node` | Last byte of the own NodeNum |
@@ -323,6 +324,7 @@ After decryption the payload is a protobuf `Data` message. The firmware encodes 
 |---|---|---|
 | `portnum` | 1 (varint) | `1` = TEXT_MESSAGE_APP, `4` = NODEINFO_APP |
 | `payload` | 2 (bytes) | UTF-8 text, or a protobuf `User` for NodeInfo |
+| `want_response` | 3 (varint) | Only with `AT+NI=1`: asks the receivers to answer with their NodeInfo |
 
 The NodeInfo it sends (at boot, every 3 hours, after `AT+NAME` / `AT+NODE` / `AT+PRESET` / `AT+RELAY`, and with `AT+NI`) is a `User` message:
 
@@ -339,7 +341,7 @@ On reception, packets whose channel hash matches are decrypted; text and NodeInf
 
 ### Worked example: a text message, byte by byte
 
-The text `Hola mesh` sent by node `!e1ec1001` on MediumFast, default key, `AT+HOP=3`, packet ID `0x1A2B3C4D`. The bytes below were produced with the firmware's own `aesKeyExpand()` / `ctr()` compiled on a PC, and cross-checked with an independent AES-CTR implementation (Python `cryptography`).
+The text `Hola mesh` sent by node `!e1ec1001` on MediumFast, default key, `AT+HOP=3`, default `AT+RETRY=2`, packet ID `0x1A2B3C4D`. The bytes below were produced with the firmware's own `aesKeyExpand()` / `ctr()` compiled on a PC, and cross-checked with an independent AES-CTR implementation (Python `cryptography`).
 
 **Plaintext `Data` (13 bytes):**
 
@@ -363,13 +365,13 @@ The text `Hola mesh` sent by node `!e1ec1001` on MediumFast, default key, `AT+HO
 | 0 | `ff ff ff ff` | `to` | Broadcast |
 | 4 | `01 10 ec e1` | `from` | `0xE1EC1001` → `!e1ec1001` |
 | 8 | `4d 3c 2b 1a` | `id` | `0x1A2B3C4D` |
-| 12 | `63` | flags | `0b011_0_0_011`: `hop_start` = 3, `via_mqtt` = 0, `want_ack` = 0, `hop_limit` = 3 |
+| 12 | `6b` | flags | `0b011_0_1_011`: `hop_start` = 3, `via_mqtt` = 0, `want_ack` = 1, `hop_limit` = 3 (`63` with `AT+RETRY=0`) |
 | 13 | `1f` | channel hash | xor(`"MediumFast"`) ^ xor(PSK) |
 | 14 | `00` | `next_hop` | None |
 | 15 | `01` | `relay_node` | Last byte of `from` |
 | 16 | `9a 9c 84 de ae d8 cf 9a 52 28 b4 1e 3e` | ciphertext | The 13 plaintext bytes above, encrypted |
 
-After one rebroadcast by a node `!xxxxxx7a`, the same frame comes back with only two bytes changed: byte 12 becomes `62` (`hop_limit` 2, so 1 hop travelled) and byte 15 becomes `7a`. The ciphertext is identical, which is why relays do not need the key and why the sender can recognize its own echo by `from` + `id`.
+After one rebroadcast by a node `!xxxxxx7a`, the same frame comes back with only two bytes changed: byte 12 becomes `6a` (`hop_limit` 2, so 1 hop travelled) and byte 15 becomes `7a`. The ciphertext is identical, which is why relays do not need the key and why the sender can recognize its own echo by `from` + `id`.
 
 ### 6. Rebroadcast (managed flooding)
 
@@ -379,14 +381,15 @@ Following `NextHopRouter::perhapsRebroadcast()` and `RadioInterface::getTxDelayM
 - Before relaying, `hop_limit` is decremented and `relay_node` is set to this node; `hop_start` and the payload are untouched.
 - **Delay:** contention window CW = map(SNR, −20..10 dB → 3..8) and slot time = CAD time + 7.6 ms. Client: `2 × 8 × slot + random(0, 2^CW) × slot`, so nodes with a weaker signal (further away) relay first. Router: `random(0, 2 × CW) × slot`, always ahead of the clients.
 - **Cancellation:** a client drops its pending rebroadcast if it hears another node relay the same packet first (duplicate `from` + `id`). A router never cancels.
-- **Echo detection:** when a neighbor relays one of our own packets, the modem hears it again with the same `from` + `id` and a different `relay_node`. That is reported as `+ECO` ("relayed by N"), an implicit ACK without `want_ack`.
+- **Echo detection:** when a neighbor relays one of our own packets, the modem hears it again with the same `from` + `id` and a different `relay_node`. That is reported as `+ECO` ("relayed by N"). As in the official firmware, this echo is the only acknowledgment a broadcast gets: nodes never send routing ACKs for packets addressed to `^all`, even with `want_ack` set.
+- **Retries:** like `ReliableRouter` (3 attempts for a broadcast, `NUM_RELIABLE_RETX`), an own text without an echo is sent again after `getRetransmissionMsec()` = 2 × airtime + (2^CW + 2 × 8 + 2^5) × slot + 4.5 s, where CW follows the channel utilization (about 5.5 s on MediumFast). It is the **same frame with the same `id`**: nodes that already received it drop it as a duplicate, so nobody sees the message twice and those that already relayed it do not relay it again. The first echo cancels the remaining attempts. `AT+RETRY` sets the number of retries (0..3, default 2).
 
-Code: `scheduleRelay()`, `cancelRelay()`, `serviceRelay()`.
+Code: `scheduleRelay()`, `cancelRelay()`, `serviceRelay()`, `ownLoop()`.
 
 ### What is not implemented
 
 - Direct messages and PKI encryption (Meshtastic 2.5+ public-key DMs), hence `is_unmessagable`.
-- `want_ack` / routing ACKs, traceroute, position, telemetry and the other port numbers (they are relayed but not decoded).
+- Routing ACKs for direct messages, traceroute, position, telemetry and the other port numbers (they are relayed but not decoded).
 - Secondary channels and custom keys: only the default primary channel with the `AQ==` key.
 - The phone app API (`ToRadio` / `FromRadio` over BLE or serial): this modem uses AT commands instead.
 
@@ -436,9 +439,12 @@ Changes take effect immediately. `AT+SAVE` stores the radio configuration in fla
 | `AT+FREQ=926.125` / `AT+FREQ=0` | Manual frequency / automatic slot |
 | `AT+HOP=3` | Max hops for packets originated by the node (0..7) |
 | `AT+RELAY=0\|1\|2` | Rebroadcast: mute / client (default) / router |
-| `AT+PWR=20` | TX power in dBm (−9..22) |
+| `AT+PWR=22` | TX power in dBm (−9..22, default 22) |
 | `AT+SEND=text` | Text broadcast on the primary channel (≤ 232 bytes) |
 | `AT+NI`, `AT+NODES` | Sends NodeInfo / list of heard nodes |
+| `AT+NI=1` | NodeInfo with `want_response`: nodes that hear it answer (`+HEARDBY`) |
+| `AT+RETRY=0..3`, `AT+RETRY?` | Retries of own texts without an echo (stored at once; 0 = off) |
+| `AT+DIAG`, `AT+DIAG=0` | Link diagnostics (see below) / reset its counters |
 | `AT+SAVE`, `AT&F`, `AT+RST` | Save to flash / factory defaults / reboot |
 | `AT+WIFI=ssid,password`, `AT+WIFI?` | Home network credentials / WiFi status |
 | `AT+WIFIMODE=AUTO\|STA\|AP` | WiFi mode (stored) |
@@ -448,7 +454,7 @@ Changes take effect immediately. `AT+SAVE` stores the radio configuration in fla
 | `AT+BLE=0\|1`, `AT+BLE?`, `AT+BLEPIN=nnnnnn` | Bluetooth off / on, status, PIN (0 = no PIN) |
 | `AT+SPEC=1\|0`, `AT+SPEC?`, `AT+SPECCFG=...` | Spectrum analyzer (see above) |
 | `AT+LOG=20`, `AT+LOGCLR` | Last N log entries / erase the log |
-| `AT+RAW=0\|1` | Trace of everything received |
+| `AT+RAW=0\|1` | Trace of everything received, with the clear header of valid frames |
 
 **Unsolicited responses:**
 
@@ -458,12 +464,40 @@ Changes take effect immediately. `AT+SAVE` stores the radio configuration in fla
 | `+NODE:!from,rssi,snr,short,long` | NodeInfo received |
 | `+TX:id` | Own message transmitted |
 | `+ECO:id,relay=XX,name,rssi,snr,hop_limit` | Another node relayed one of your messages (`hop_limit` = HOP−1: direct neighbor; lower: further away) |
-| `+ECO:id,0` | Nobody relayed it within 15 s |
+| `+RETX:id,k/N` | Retry k of N of an own text that got no echo |
+| `+ECO:id,0` | No relay heard after the last attempt (and at least 15 s) |
+| `+HEARDBY:!from,rssi,snr,short` | NodeInfo addressed to this node: that node hears you (reply to `AT+NI=1`) |
+| `+RAW:len,status,rssi,snr,hash[,!from,id,hl/hs,next_hop,relay]` | Every received frame (with `AT+RAW=1`); status 0 = OK, −7 = CRC error, −24 = damaged header |
 | `+RELAY:!from,id,hop_limit` | Packet rebroadcast (with `AT+RAW=1`) |
 | `+WIFI:UP,...`, `+WIFI:DOWN`, `+WIFI:AP,...`, `+WIFI:PORTAL,...`, `+WIFI:NOT_FOUND,...` | WiFi changes |
 | `+BLE:CONNECTED`, `+BLE:DISCONNECTED` | Bluetooth connection changes |
 | `+SPEC:ON,...`, `+SPEC:OFF,reason,RADIO=e` | Analyzer entry and exit |
 | `[web] command`, `[ble] command` | Command received from the web or over BLE |
+
+### Link diagnostics (`AT+DIAG`)
+
+Counters since boot or since `AT+DIAG=0`, measured without leaving the mesh. Typical use: `AT+DIAG=0`, leave the modem 15 to 30 minutes in one condition, read `AT+DIAG`, change one thing (USB from the PC vs a power bank, antenna, place, power) and repeat.
+
+```
++DIAG:TIME=1800s,MediumFast,926.1250MHz,PWR=22,RETRY=2
++DIAG:NOISE,P10=-116.5dBm,P50=-115.0dBm,N=35710
++DIAG:AIRTIME,CHUTIL=4.2%,TXUTIL=0.31%
++DIAG:RX,OK=212,CRC=37,HEADER=9,ERR=0,OTHER_CH=14,DUP=96
++DIAG:SNR,MIN=-13.8,AVG=-6.9,MAX=9.5,LIMIT=-12.5,MARGIN=5.6dB
++DIAG:TX,OWN=12,RETX=7,ECHOED=9,NO_ECHO=3,RELAYED=41
+```
+
+*(Illustrative values.)*
+
+| Line | Meaning |
+|---|---|
+| `NOISE` | Instantaneous RSSI (`GetRssiInst`) sampled every 50 ms while in RX. P10 approximates the floor without traffic, P50 includes it. With BW 250 kHz the thermal floor plus a 6 dB NF is about −114 dBm; a P10 several dB above that points to local interference (for example common-mode noise from a PC on the USB cable). The absolute value carries the SX1262 RSSI tolerance, so use it to **compare conditions**. |
+| `AIRTIME` | `CHUTIL`: % of the last minute with the channel busy (every frame heard plus own TX). `TXUTIL`: % of the last hour spent transmitting. Same definitions as `AirTime` in the official firmware. |
+| `RX` | Valid frames, CRC errors, damaged headers, other errors, frames of other channels (relayed but not decrypted) and duplicates. Many CRC and header errors relative to `OK` mean the modem detects preambles it can barely demodulate: the link is at the limit. |
+| `SNR` | Of valid frames. `LIMIT` is the demodulation limit of the preset (−2.5 × (SF − 4): SF7 −7.5 dB … SF12 −20 dB) and `MARGIN` = average SNR − limit. |
+| `TX` | Own packets, retries, how many got at least one echo, how many did not, and packets relayed for others. |
+
+`AT+NI=1` sends NodeInfo with `want_response`. Each node that receives it answers with its own NodeInfo addressed to this modem, reported as `+HEARDBY` (and in the chat). The official firmware throttles these answers: one per requester every 12 hours, and none if it sent its own NodeInfo recently. So the list of answers is a lower bound, and silence does not prove that nobody hears you.
 
 ---
 
